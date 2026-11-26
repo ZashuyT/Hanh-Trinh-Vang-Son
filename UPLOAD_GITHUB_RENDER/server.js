@@ -319,6 +319,194 @@ function finalizeRoomTurnOrder(room) {
     room.openingQuiz.completed = true;
 }
 
+// ============================================================================
+// BOT TAKEOVER & SEAMLESS RECONNECT ENGINE (VÁ 2 — ZERO-STALL PVP!)
+// - Tracks per-client `lastSeen` timestamp on status, sync, and market-tx
+// - On `/api/room/leave` during "playing" OR > 40s inactivity:
+//   + Keeps ship in match, flips player to `isAI = true` with " [Bot]" suffix
+//   + Preserves position, cargo, HP, points, originalClientId & originalName
+//   + Auto-transfers Host role to earliest remaining real human player
+// - On reconnect (F5 or re-entering code with same clientId / name):
+//   + Flips `isAI = false`, strips " [Bot]", hands control right back!
+// ============================================================================
+const DISCONNECT_TAKEOVER_MS = 40 * 1000;
+
+function touchClientActivity(room, clientId) {
+    if (!room || !clientId || String(clientId).startsWith("bot_")) return;
+    if (!room.clientLastSeen) room.clientLastSeen = {};
+    room.clientLastSeen[clientId] = Date.now();
+}
+
+function initAllHumanLastSeen(room) {
+    if (!room) return;
+    const now = Date.now();
+    if (!room.clientLastSeen) room.clientLastSeen = {};
+    (room.seats || []).forEach(s => {
+        if (s.type === "human" && s.clientId && !String(s.clientId).startsWith("bot_")) {
+            room.clientLastSeen[s.clientId] = now;
+        }
+    });
+    room.matchStartedAt = now;
+}
+
+function pushTakeoverEvent(room, type, text) {
+    if (!room) return;
+    if (!Array.isArray(room.takeoverEvents)) room.takeoverEvents = [];
+    room.takeoverEvents.push({
+        id: `${type}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        type,
+        text,
+        ts: Date.now()
+    });
+    if (room.takeoverEvents.length > 20) {
+        room.takeoverEvents = room.takeoverEvents.slice(-20);
+    }
+}
+
+function transferHostToEarliestHuman(room) {
+    if (!room || !Array.isArray(room.seats)) return null;
+    const remainingHumans = room.seats
+        .filter(s => s.type === "human" && !s.botTakenOver && s.clientId)
+        .sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
+    if (remainingHumans.length === 0) return null;
+
+    room.seats.forEach(s => { s.isHost = false; });
+    const newHost = remainingHumans[0];
+    newHost.isHost = true;
+    newHost.occupiedBy = `${newHost.name} (Chủ Phòng)`;
+    room.hostClientId = newHost.clientId;
+    room.hostName = newHost.name;
+    return newHost;
+}
+
+function takeoverPlayerByBot(room, seat, reasonLabel = "mất kết nối") {
+    if (!room || !seat || room.status !== "playing") return false;
+    if (seat.botTakenOver) return false;
+
+    const oldClientId = seat.originalClientId || seat.clientId;
+    const origName = (seat.originalName || seat.name || `Thuyền Trưởng #${seat.seatIndex + 1}`).replace(/\s*\[Bot\]$/i, "");
+    const botDisplayName = `${origName} [Bot]`;
+    const wasHost = Boolean(seat.isHost);
+
+    seat.originalClientId = oldClientId;
+    seat.originalName = origName;
+    seat.botTakenOver = true;
+    seat.type = "ai";
+    seat.name = botDisplayName;
+    seat.occupiedBy = `${origName} [Bot]`;
+    seat.isHost = false;
+
+    if (room.gameState && Array.isArray(room.gameState.players)) {
+        const gp = room.gameState.players.find(
+            p => (oldClientId && (p.clientId === oldClientId || p.originalClientId === oldClientId)) || p.seatIndex === seat.seatIndex
+        );
+        if (gp) {
+            gp.originalClientId = gp.originalClientId || oldClientId || gp.clientId;
+            gp.originalName = gp.originalName || origName;
+            gp.isAI = true;
+            gp.botTakenOver = true;
+            gp.name = botDisplayName;
+        }
+    }
+
+    if (wasHost || !room.seats.some(s => s.type === "human" && !s.botTakenOver && s.isHost)) {
+        transferHostToEarliestHuman(room);
+    }
+
+    pushTakeoverEvent(room, "takeover", `🤖 Tàu Máy (Bot) đã tiếp quản tàu của [${origName}] (${reasonLabel}) — giữ nguyên vị trí, kho hàng & điểm số!`);
+    room.version++;
+    room.updatedAt = Date.now();
+    return true;
+}
+
+function restorePlayerFromBot(room, seat, newClientId) {
+    if (!room || !seat) return false;
+    const wasTakenOver = Boolean(seat.botTakenOver);
+    const oldClientId = seat.originalClientId || seat.clientId;
+    const origName = (seat.originalName || seat.name || `Thuyền Trưởng #${seat.seatIndex + 1}`).replace(/\s*\[Bot\]$/i, "");
+
+    seat.type = "human";
+    seat.botTakenOver = false;
+    seat.clientId = newClientId;
+    seat.originalClientId = newClientId;
+    seat.name = origName;
+    seat.originalName = origName;
+
+    const hasActiveHost = room.seats.some(s => s.type === "human" && !s.botTakenOver && s.isHost && s.seatIndex !== seat.seatIndex);
+    if (!hasActiveHost) {
+        seat.isHost = true;
+        room.hostClientId = newClientId;
+        room.hostName = origName;
+    }
+    seat.occupiedBy = seat.isHost ? `${origName} (Chủ Phòng)` : `${origName} (Người chơi)`;
+
+    if (room.gameState && Array.isArray(room.gameState.players)) {
+        const gp = room.gameState.players.find(
+            p => (oldClientId && (p.clientId === oldClientId || p.originalClientId === oldClientId)) || p.seatIndex === seat.seatIndex
+        );
+        if (gp) {
+            gp.isAI = false;
+            gp.botTakenOver = false;
+            gp.clientId = newClientId;
+            gp.originalClientId = newClientId;
+            gp.name = origName;
+            gp.originalName = origName;
+        }
+    }
+
+    touchClientActivity(room, newClientId);
+    if (wasTakenOver) {
+        pushTakeoverEvent(room, "handover", `👤 Thuyền trưởng [${origName}] đã kết nối lại — Tàu Máy (Bot) đã bàn giao lại quyền điều khiển tàu!`);
+    }
+    room.version++;
+    room.updatedAt = Date.now();
+    return true;
+}
+
+function enforceTakenOverBotFlagsOnGameState(room) {
+    if (!room || room.status !== "playing" || !room.gameState || !Array.isArray(room.gameState.players)) return;
+    (room.seats || []).forEach(seat => {
+        if (!seat.botTakenOver) return;
+        const gp = room.gameState.players.find(
+            p => (seat.originalClientId && (p.clientId === seat.originalClientId || p.originalClientId === seat.originalClientId)) || p.seatIndex === seat.seatIndex
+        );
+        if (gp) {
+            const origName = (seat.originalName || gp.originalName || gp.name || "").replace(/\s*\[Bot\]$/i, "");
+            gp.originalClientId = gp.originalClientId || seat.originalClientId;
+            gp.originalName = gp.originalName || origName;
+            gp.isAI = true;
+            gp.botTakenOver = true;
+            gp.name = `${origName} [Bot]`;
+        }
+    });
+}
+
+function checkDisconnectedPlayersInRoom(room) {
+    if (!room || room.status !== "playing" || !Array.isArray(room.seats)) return false;
+    const now = Date.now();
+    let changed = false;
+    room.seats.forEach(seat => {
+        if (seat.type !== "human" || seat.botTakenOver || !seat.clientId) return;
+        const last = (room.clientLastSeen && room.clientLastSeen[seat.clientId]) || room.matchStartedAt || seat.joinedAt || now;
+        if (now - last > DISCONNECT_TAKEOVER_MS) {
+            if (takeoverPlayerByBot(room, seat, "mất tín hiệu quá 40 giây")) {
+                changed = true;
+            }
+        }
+    });
+    if (changed) saveRoomsToDisk();
+    return changed;
+}
+
+// Background sweep every 5 seconds to catch disconnects promptly even if other clients are slow to poll
+setInterval(() => {
+    rooms.forEach(room => {
+        if (room && room.status === "playing") {
+            checkDisconnectedPlayersInRoom(room);
+        }
+    });
+}, 5000);
+
 http.createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
         return sendJSON(res, 200, { ok: true });
@@ -367,6 +555,8 @@ http.createServer(async (req, res) => {
             openingQuiz: null,
             openingAnswers: {},
             gameState: null,
+            clientLastSeen: { [clientId]: now },
+            takeoverEvents: [],
             updatedAt: now
         };
         rooms.set(code, room);
@@ -391,13 +581,23 @@ http.createServer(async (req, res) => {
             });
         }
 
-        const existingSeat = room.seats.find(s => s.clientId && s.clientId === clientId);
+        const existingSeat = room.seats.find(s =>
+            (s.clientId && s.clientId === clientId) ||
+            (s.originalClientId && s.originalClientId === clientId)
+        );
         if (existingSeat) {
+            if (existingSeat.botTakenOver) {
+                restorePlayerFromBot(room, existingSeat, clientId);
+                saveRoomsToDisk();
+                return sendJSON(res, 200, { ok: true, room, assignedSeat: existingSeat.seatIndex, clientId, reconnected: true, restoredFromBot: true });
+            }
             if (playerName) {
                 existingSeat.name = playerName;
+                existingSeat.originalName = playerName;
                 existingSeat.occupiedBy = existingSeat.isHost ? `${playerName} (Chủ Phòng)` : `${playerName} (Người chơi)`;
                 if (existingSeat.isHost) room.hostName = playerName;
             }
+            touchClientActivity(room, clientId);
             room.version++;
             room.updatedAt = Date.now();
             saveRoomsToDisk();
@@ -405,28 +605,18 @@ http.createServer(async (req, res) => {
         }
 
         if (room.status !== "waiting") {
-            // Allow returning player who reloaded the page (F5) or re-entered by name to seamlessly reconnect!
-            const seatByName = room.seats.find(s =>
-                s.type === "human" &&
-                s.name &&
-                playerName &&
-                s.name.toLowerCase() === playerName.toLowerCase()
-            ) || room.seats.find(s => s.type === "human" && !s.isHost);
+            // Allow returning player (F5 or re-entering code with same name/clientId) to seamlessly reclaim their ship from Bot!
+            const normName = playerName.toLowerCase();
+            const seatByName = room.seats.find(s => {
+                const origN = String(s.originalName || s.name || "").replace(/\s*\[Bot\]$/i, "").toLowerCase();
+                return (s.type === "human" || s.botTakenOver) && origN && normName && origN === normName;
+            }) || room.seats.find(s => s.botTakenOver) || room.seats.find(s => s.type === "human" && !s.isHost);
 
             if (seatByName) {
-                const oldClientId = seatByName.clientId;
-                seatByName.clientId = clientId;
-                if (seatByName.isHost) room.hostClientId = clientId;
-                if (room.gameState && Array.isArray(room.gameState.players)) {
-                    const gp = room.gameState.players.find(
-                        p => p.clientId === oldClientId || p.seatIndex === seatByName.seatIndex
-                    );
-                    if (gp) gp.clientId = clientId;
-                }
-                room.version++;
-                room.updatedAt = Date.now();
+                const wasBot = Boolean(seatByName.botTakenOver);
+                restorePlayerFromBot(room, seatByName, clientId);
                 saveRoomsToDisk();
-                return sendJSON(res, 200, { ok: true, room, assignedSeat: seatByName.seatIndex, clientId, reconnected: true });
+                return sendJSON(res, 200, { ok: true, room, assignedSeat: seatByName.seatIndex, clientId, reconnected: true, restoredFromBot: wasBot });
             }
 
             return sendJSON(res, 400, {
@@ -468,10 +658,13 @@ http.createServer(async (req, res) => {
 
         targetSeat.type = "human";
         targetSeat.name = playerName || `Thuyền Trưởng #${targetSeat.seatIndex + 1}`;
+        targetSeat.originalName = targetSeat.name;
         targetSeat.clientId = clientId;
+        targetSeat.originalClientId = clientId;
         targetSeat.occupiedBy = `${targetSeat.name} (Người chơi)`;
         targetSeat.isHost = false;
         targetSeat.joinedAt = Date.now();
+        touchClientActivity(room, clientId);
 
         room.version++;
         room.updatedAt = Date.now();
@@ -494,10 +687,10 @@ http.createServer(async (req, res) => {
         if (action === "add_bot") {
             const arch = DEFAULT_ARCHETYPES[seatIdx] || DEFAULT_ARCHETYPES[1];
             seat.type = "ai";
-            seat.name = `${arch.name} (Bot AI)`;
+            seat.name = `${arch.name} (Tàu Máy)`;
             seat.vesselTitle = "🎲 Thuyền Ngẫu Nhiên Khi Vào Trận";
             seat.clientId = `bot_seat_${seatIdx}`;
-            seat.occupiedBy = "Máy (Bot AI)";
+            seat.occupiedBy = "Tàu Máy (Bot)";
             seat.isHost = false;
             seat.joinedAt = null;
         } else if (action === "clear_seat" && !seat.isHost) {
@@ -516,20 +709,30 @@ http.createServer(async (req, res) => {
         return sendJSON(res, 200, { ok: true, room });
     }
 
-    // 4. LEAVE ROOM (Auto-transfer Host to next human in join order; Auto-close if 0 humans left)
+    // 4. LEAVE ROOM (During "playing": Bot takes over ship & auto-transfers Host; During "waiting": clears seat)
     if (urlPath === "/api/room/leave" && req.method === "POST") {
         const body = await parseBody(req);
         const code = normalizeCode(body.code);
         const clientId = body.clientId;
         const room = rooms.get(code);
         if (room) {
-            const seat = room.seats.find(s => s.clientId === clientId);
+            const seat = room.seats.find(s => s.clientId === clientId || s.originalClientId === clientId);
             if (seat) {
+                if (room.status === "playing" && room.gameState) {
+                    // Do NOT delete the ship! Convert player to Bot Takeover & transfer Host to earliest remaining real player!
+                    takeoverPlayerByBot(room, seat, "rời phòng ngang");
+                    saveRoomsToDisk();
+                    return sendJSON(res, 200, { ok: true, botTakenOver: true });
+                }
+
                 const wasHost = Boolean(seat.isHost);
                 seat.type = "empty";
                 seat.name = "Đang chờ người chơi...";
                 seat.vesselTitle = "🎲 Thuyền Ngẫu Nhiên Khi Vào Trận";
                 seat.clientId = null;
+                seat.originalClientId = null;
+                seat.originalName = null;
+                seat.botTakenOver = false;
                 seat.occupiedBy = null;
                 seat.isHost = false;
                 seat.joinedAt = null;
@@ -548,12 +751,7 @@ http.createServer(async (req, res) => {
 
                 // If the host left, transfer Host role to the person who joined earliest after the host!
                 if (wasHost || !room.seats.some(s => s.isHost)) {
-                    room.seats.forEach(s => { s.isHost = false; });
-                    const newHost = remainingHumans[0];
-                    newHost.isHost = true;
-                    newHost.occupiedBy = `${newHost.name} (Chủ Phòng)`;
-                    room.hostClientId = newHost.clientId;
-                    room.hostName = newHost.name;
+                    transferHostToEarliestHuman(room);
                 }
 
                 room.version++;
@@ -627,6 +825,7 @@ http.createServer(async (req, res) => {
             room.gameState = body.gameState || null;
             room.openingQuiz = null;
             room.openingAnswers = {};
+            initAllHumanLastSeen(room);
             room.version++;
             room.updatedAt = Date.now();
             saveRoomsToDisk();
@@ -635,11 +834,12 @@ http.createServer(async (req, res) => {
 
         room.status = "turn_order_quiz";
         room.gameState = body.gameState || null;
+        initAllHumanLastSeen(room);
         const nowMs = Date.now();
         room.openingQuiz = {
             quiz: quizObj,
-            countdownEndsAt: nowMs + 3000,
-            startedAt: nowMs + 3000,
+            countdownEndsAt: nowMs + 10000,
+            startedAt: nowMs + 10000,
             completed: false,
             rankings: []
         };
@@ -746,6 +946,7 @@ http.createServer(async (req, res) => {
             finalizeRoomTurnOrder(room);
         }
         room.status = "playing";
+        initAllHumanLastSeen(room);
         if (body.gameState) {
             room.gameState = body.gameState;
         }
@@ -755,15 +956,18 @@ http.createServer(async (req, res) => {
         return sendJSON(res, 200, { ok: true, room });
     }
 
-    // 9. SYNC LIVE GAME STATE
+    // 9. SYNC LIVE GAME STATE (Records lastSeen & preserves Bot Takeover flags!)
     if (urlPath === "/api/room/sync" && req.method === "POST") {
         const body = await parseBody(req);
         const code = normalizeCode(body.code);
         const room = rooms.get(code);
         if (!room) return sendJSON(res, 404, { ok: false, error: "Room not found" });
 
+        if (body.clientId) touchClientActivity(room, body.clientId);
         if (body.gameState) {
             room.gameState = body.gameState;
+            enforceTakenOverBotFlagsOnGameState(room);
+            checkDisconnectedPlayersInRoom(room);
             room.version++;
             room.updatedAt = Date.now();
             saveRoomsToDisk();
@@ -778,11 +982,33 @@ http.createServer(async (req, res) => {
         const room = rooms.get(code);
         if (!room || !room.gameState) return sendJSON(res, 404, { ok: false, error: "Room or gameState not found" });
 
+        if (body.clientId) touchClientActivity(room, body.clientId);
+
         if (Array.isArray(body.marketListings)) {
             room.gameState.marketListings = body.marketListings;
         }
+        if (Array.isArray(body.buyOrders)) {
+            room.gameState.buyOrders = body.buyOrders;
+        }
+        if (Array.isArray(body.barterOrders)) {
+            room.gameState.barterOrders = body.barterOrders;
+        }
         if (Array.isArray(body.tradeBulletinNotices)) {
             room.gameState.tradeBulletinNotices = body.tradeBulletinNotices;
+        }
+        if (body.portResourceStock && typeof body.portResourceStock === "object") {
+            room.gameState.portResourceStock = body.portResourceStock;
+        }
+        if (typeof body.portResResetRemainingSec === "number") {
+            room.gameState.portResResetRemainingSec = body.portResResetRemainingSec;
+        }
+        if (body.matchStats && typeof body.matchStats === "object") {
+            const curStats = room.gameState.matchStats || { portTrades: {}, portVisits: {}, totalP2P: 0, disasterDamage: 0, stormReefDamage: 0 };
+            room.gameState.matchStats = {
+                ...curStats,
+                ...body.matchStats,
+                totalP2P: Math.max(curStats.totalP2P || 0, body.matchStats.totalP2P || 0)
+            };
         }
         const incomingPlayers = Array.isArray(body.updatedPlayers)
             ? body.updatedPlayers
@@ -795,11 +1021,22 @@ http.createServer(async (req, res) => {
                     p.id === up.id
                 );
                 if (target) {
-                    if (typeof up.coins === "number") target.coins = up.coins;
+                    if (typeof up.coins === "number") target.coins = Math.min(30, Math.max(0, up.coins));
                     if (typeof up.food === "number") target.food = up.food;
                     if (typeof up.wood === "number") target.wood = up.wood;
                     if (typeof up.iron === "number") target.iron = up.iron;
+                    if (typeof up.maxCargo === "number") target.maxCargo = Math.max(target.maxCargo || 12, up.maxCargo);
+                    if (up.charterRegionId !== undefined) target.charterRegionId = up.charterRegionId;
                     if (Array.isArray(up.specialties)) target.specialties = up.specialties;
+                    // Sync P2P stats, Secret Quest progress & Prosperity Points so off-turn trades never lose progress!
+                    if (typeof up.p2pTrades === "number") target.p2pTrades = Math.max(target.p2pTrades || 0, up.p2pTrades);
+                    if (typeof up.p2pCount === "number") target.p2pCount = Math.max(target.p2pCount || 0, up.p2pCount);
+                    if (typeof up.tradeCount === "number") target.tradeCount = Math.max(target.tradeCount || 0, up.tradeCount);
+                    if (up.stats && typeof up.stats === "object") target.stats = { ...(target.stats || {}), ...up.stats };
+                    if (Array.isArray(up.secretQuests)) target.secretQuests = up.secretQuests;
+                    if (typeof up.secretPoints === "number") target.secretPoints = Math.max(target.secretPoints || 0, up.secretPoints);
+                    if (typeof up.prosperityPoints === "number") target.prosperityPoints = Math.max(target.prosperityPoints || 0, up.prosperityPoints);
+                    if (typeof up.publicPoints === "number") target.publicPoints = Math.max(target.publicPoints || 0, up.publicPoints);
                 }
             });
         }
@@ -826,12 +1063,17 @@ http.createServer(async (req, res) => {
         return sendJSON(res, 200, { ok: true, room });
     }
 
-    // 10. POLL ROOM STATUS (WITH LIGHTWEIGHT VERSION DELTA CHECK)
+    // 10. POLL ROOM STATUS (WITH LIGHTWEIGHT VERSION DELTA CHECK + HEARTBEAT & 40S DISCONNECT WATCHDOG)
     if (urlPath === "/api/room/status" && req.method === "GET") {
         const code = normalizeCode(parsedUrl.searchParams.get("code"));
         const clientVersion = Number(parsedUrl.searchParams.get("v") || 0);
+        const clientId = parsedUrl.searchParams.get("clientId") || "";
         const room = rooms.get(code);
         if (!room) return sendJSON(res, 200, { ok: false, roomClosed: true, error: "Phòng đã đóng!" });
+        if (clientId) touchClientActivity(room, clientId);
+        if (room.status === "playing") {
+            checkDisconnectedPlayersInRoom(room);
+        }
         if (clientVersion > 0 && clientVersion === room.version) {
             return sendJSON(res, 200, { ok: true, unchanged: true, version: room.version });
         }

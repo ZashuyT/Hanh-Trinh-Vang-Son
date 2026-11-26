@@ -1233,30 +1233,30 @@ window.GAME_DATA = {
     },
 
     // ========================================================================
-    // GOLDEN / SILVER AXE NPC MINIGAME EVENTS (With Visual Memory Card!)
+    // INTERNATIONAL FDI TRADE FLEET EVENTS (🚢 THƯƠNG ĐOÀN QUỐC TẾ — TÀU FDI)
     // ========================================================================
     npcEvents: [
         {
-            title: "Thử Thách Rìu Vàng – Rìu Bạc Trên Sông",
-            npcName: "Tiên Ông Sông Nước Việt",
-            story: "Từ làn sương huyền ảo trên mặt nước, Tiên Ông hiện lên tay cầm chiếc Rìu Vàng lấp lánh, Rìu Bạc sáng ngời và Rìu Sắt giản dị. Tiên Ông chỉ xuất hiện mỗi 4–5 vòng một lần để thử lòng trung thực và trí tuệ Địa lý của người đi biển!",
-            q: "Để nhận phần thưởng cao nhất của Tiên Ông (+3 Xu Vàng), hãy chọn chiếc rìu trung thực VÀ trả lời đúng: Hệ thống sông nào có tổng lượng nước lớn nhất Việt Nam?",
+            title: "Khảo Sát Hợp Tác Vận Tải Thủy Nội Địa & Biển Đông",
+            npcName: "🚢 Thương Đoàn Quốc Tế (Tàu FDI)",
+            story: "Một đoàn tàu khảo sát đầu tư quốc tế (FDI) vừa cập hải phận Việt Nam để tìm kiếm đối tác logistics chiến lược. Đại diện Thương Đoàn đặt câu hỏi khảo sát địa lý thủy văn Việt Nam để cấp gói tài trợ hợp tác (+2 đến +3 Xu Vàng)!",
+            q: "Để nhận gói tài trợ cao nhất từ Thương Đoàn Quốc Tế (+3 Xu Vàng), hãy trả lời chính xác: Hệ thống sông nào có tổng lượng nước lớn nhất Việt Nam?",
             options: [
-                "Nhận Rìu Sắt của mình & trả lời: Hệ thống sông Mê Công (Sông Cửu Long - chiếm hơn 60% tổng lượng nước cả nước)",
-                "Tham lam nhận Rìu Vàng & trả lời: Sông Tô Lịch có lưu lượng lớn nhất",
-                "Nhận Rìu Bạc & trả lời: Sông Hương là sông dài nhất châu Á",
-                "Nhận Rìu Sắt & trả lời: Việt Nam không có con sông nào đổ ra Biển Đông"
+                "Hệ thống sông Mê Công (Sông Cửu Long - chiếm hơn 60% tổng lượng nước cả nước)",
+                "Sông Tô Lịch có lưu lượng lớn nhất cả nước",
+                "Sông Hương là con sông dài nhất châu Á",
+                "Việt Nam không có con sông nào đổ ra Biển Đông"
             ],
             correct: 0,
-            explanation: "Trung thực là phẩm chất vàng của người đi biển! Hệ thống sông Mê Công (chảy vào Việt Nam qua sông Tiền và sông Hậu) có tổng lượng nước khoảng 507 tỷ m³/năm, chiếm hơn 60% tổng lượng nước sông ngòi toàn quốc.",
+            explanation: "Chính xác! Hệ thống sông Mê Công (chảy vào Việt Nam qua sông Tiền và sông Hậu) có tổng lượng nước khoảng 507 tỷ m³/năm, chiếm hơn 60% tổng lượng nước sông ngòi toàn quốc.",
             visualImg: "assets/monuments/mekong_basin.png",
             visualCaption: "Lưu vực sông Mê Công (Cửu Long) đóng góp hơn 60% tổng lượng nước mặt của toàn bộ hệ thống sông ngòi Việt Nam.",
             visualCredit: "Bản đồ: Shannon1 / Wikimedia Commons (CC BY-SA 4.0) • Nguồn: Ủy hội Sông Mê Công Việt Nam"
         },
         {
-            title: "Hội Thề Thương Hồ & Bài Toán Gió Mùa Biển Đông",
-            npcName: "Lão Tiên Tri Khí Tượng Biển Đông",
-            story: "Lão Tiên Tri nắm giữ chiếc Rìu Vàng và Rìu Bạc của các bậc thầy đóng thuyền cổ. Ông mỉm cười khảo nghiệm đoàn thuyền về quy luật gió mùa trên Biển Đông.",
+            title: "Đánh Giá Tuyến Hàng Hải & Gió Mùa Biển Đông",
+            npcName: "🚢 Thương Đoàn Quốc Tế (Tàu FDI)",
+            story: "Đoàn chuyên gia hàng hải trên Tàu FDI đang lập phương án tối ưu hóa tuyến vận tải container Bắc – Nam theo mùa gió. Họ mời thuyền trưởng chia sẻ kiến thức khí tượng Biển Đông để ký kết hợp đồng vận chuyển!",
             q: "Vào mùa đông (từ tháng 11 đến tháng 4 năm sau), loại gió thịnh hành trên vùng biển Việt Nam thổi theo hướng chính nào, giúp thuyền buồm cổ xuôi dòng từ Bắc vào Nam?",
             options: [
                 "Hướng Đông Bắc (Gió mùa Đông Bắc và Tín phong bán cầu Bắc)",
@@ -1271,9 +1271,9 @@ window.GAME_DATA = {
             visualCredit: "Ảnh: Viethavvh / Vietnamese Wikipedia (Public Domain) • Nguồn: Trung tâm Dự báo KTTV Quốc gia"
         },
         {
-            title: "Báu Vật Thềm Lục Địa & Chủ Quyền Biển Đảo",
-            npcName: "Thần Giữ Mỏ Rìu Bạc",
-            story: "Một thợ đóng tàu đánh rơi búa sắt xuống vùng biển sâu. Thần Biển hiện lên cùng chiếc Rìu Vàng và đặt câu hỏi về Địa lý Biển Đảo Việt Nam.",
+            title: "Hợp Tác Kinh Tế Biển & Chủ Quyền Thềm Lục Địa",
+            npcName: "🚢 Thương Đoàn Quốc Tế (Tàu FDI)",
+            story: "Phái đoàn đầu tư cảng nước sâu trên Tàu FDI đang khảo sát quy mô vùng biển Việt Nam để mở rộng tuyến thương mại quốc tế. Hãy cung cấp thông tin địa lý biển đảo chính xác để nhận gói tài trợ FDI!",
             q: "Vùng biển Việt Nam thuộc Biển Đông có diện tích khoảng bao nhiêu km² và hai quần đảo tiền tiêu xa bờ thuộc chủ quyền thiêng liêng của Tổ quốc là gì?",
             options: [
                 "Khoảng 1 triệu km²; hai quần đảo Hoàng Sa (TP. Đà Nẵng) và Trường Sa (tỉnh Khánh Hòa)",
@@ -1468,6 +1468,222 @@ window.GAME_DATA = {
                     explanation: "Trùng với mùa mưa gió mùa mùa hạ ở Bắc Bộ, sông Hồng có mùa lũ từ tháng 6–10 và đỉnh lũ rơi vào tháng 8."
                 }
             ]
+        }
+    ],
+
+    // ========================================================================
+    // 12 PUBLIC INTER-REGIONAL DELIVERY QUESTS (NHIỆM VỤ CHUNG — 3 CÔNG KHAI)
+    // ========================================================================
+    publicQuestsPool: [
+        {
+            id: "pq_ct_steel_wood",
+            title: "Củng Cố Cầu Cảng Cửu Long",
+            portRegionId: 5,
+            portLabel: "Thương Cảng Cần Thơ – Cửu Long (ĐBSCL)",
+            req: { iron: 1, wood: 1 },
+            reqText: "1 ⛏️ Sắt + 1 🌲 Gỗ",
+            rewardPoints: 3,
+            rewardCoins: 2,
+            flavor: "Vận chuyển vật liệu gia cố đê bao và cầu cảng vùng sông nước Tây Nam Bộ."
+        },
+        {
+            id: "pq_sg_rice_spec",
+            title: "Tiếp Tế Đô Thị Đông Nam Bộ",
+            portRegionId: 4,
+            portLabel: "Thương Cảng Cái Mép – Sài Gòn (Đông Nam Bộ)",
+            req: { food: 2, otherSpec: 1 },
+            reqText: "2 🌾 Lúa + 1 📦 Đặc sản vùng khác",
+            rewardPoints: 3,
+            rewardCoins: 0,
+            flavor: "Cung ứng lương thực và đặc sản liên vùng cho đầu tàu kinh tế phía Nam."
+        },
+        {
+            id: "pq_hp_rice",
+            title: "Kho Dự Trữ Đồng Bằng Bắc Bộ",
+            portRegionId: 1,
+            portLabel: "Thương Cảng Hải Phòng (ĐB Sông Hồng)",
+            req: { food: 2 },
+            reqText: "2 🌾 Lúa",
+            rewardPoints: 2,
+            rewardCoins: 2,
+            flavor: "Tập kết lúa gạo tại cửa ngõ giao thương lớn nhất Đồng bằng sông Hồng."
+        },
+        {
+            id: "pq_cl_iron_food",
+            title: "Hậu Cần Vùng Mỏ Quảng Ninh",
+            portRegionId: 0,
+            portLabel: "Thương Cảng Cái Lân (TD & MN Bắc Bộ)",
+            req: { iron: 1, food: 1 },
+            reqText: "1 ⛏️ Sắt + 1 🌾 Lúa",
+            rewardPoints: 2,
+            rewardCoins: 2,
+            flavor: "Bổ sung vật tư công nghiệp và lương thực cho tuyến cảng nước sâu Đông Bắc."
+        },
+        {
+            id: "pq_dn_wood_spec",
+            title: "Giao Thương Hành Lang Miền Trung",
+            portRegionId: 2,
+            portLabel: "Thương Cảng Tiên Sa (Đà Nẵng)",
+            req: { wood: 2, otherSpec: 1 },
+            reqText: "2 🌲 Gỗ + 1 📦 Đặc sản vùng khác",
+            rewardPoints: 3,
+            rewardCoins: 1,
+            flavor: "Đóng tàu đánh bắt xa bờ và kết nối đặc sản qua cửa ngõ miền Trung."
+        },
+        {
+            id: "pq_qn_all_res",
+            title: "Tuyến Hàng Liên Vùng Tây Nguyên",
+            portRegionId: 3,
+            portLabel: "Thương Cảng Quy Nhơn (Tây Nguyên – NTB)",
+            req: { food: 1, wood: 1, iron: 1 },
+            reqText: "1 🌾 Lúa + 1 🌲 Gỗ + 1 ⛏️ Sắt",
+            rewardPoints: 3,
+            rewardCoins: 2,
+            flavor: "Tập kết đủ 3 nguồn tài nguyên chiến lược nối biển Đông lên đại ngàn Tây Nguyên."
+        },
+        {
+            id: "pq_sg_iron_wood",
+            title: "Mở Rộng Khu Công Nghiệp Cái Mép",
+            portRegionId: 4,
+            portLabel: "Thương Cảng Cái Mép – Sài Gòn (Đông Nam Bộ)",
+            req: { iron: 1, wood: 2 },
+            reqText: "1 ⛏️ Sắt + 2 🌲 Gỗ",
+            rewardPoints: 3,
+            rewardCoins: 1,
+            flavor: "Cung cấp nguyên liệu xây dựng nhà xưởng và kho bãi xuất khẩu."
+        },
+        {
+            id: "pq_hp_spec_wood",
+            title: "Hội Chợ Đặc Sản Đất Cảng",
+            portRegionId: 1,
+            portLabel: "Thương Cảng Hải Phòng (ĐB Sông Hồng)",
+            req: { wood: 1, otherSpec: 1 },
+            reqText: "1 🌲 Gỗ + 1 📦 Đặc sản vùng khác",
+            rewardPoints: 2,
+            rewardCoins: 2,
+            flavor: "Đưa sản vật vùng miền về trưng bày và xuất khẩu qua cảng Hải Phòng."
+        },
+        {
+            id: "pq_dn_iron",
+            title: "Lắp Đặt Điện Gió Duyên Hải",
+            portRegionId: 2,
+            portLabel: "Thương Cảng Tiên Sa (Đà Nẵng)",
+            req: { iron: 2 },
+            reqText: "2 ⛏️ Sắt",
+            rewardPoints: 3,
+            rewardCoins: 1,
+            flavor: "Cung cấp thép kết cấu cho các cánh đồng điện gió ven biển miền Trung."
+        },
+        {
+            id: "pq_ct_food_spec",
+            title: "Chợ Đầu Mối Nông Sản Miền Tây",
+            portRegionId: 5,
+            portLabel: "Thương Cảng Cần Thơ – Cửu Long (ĐBSCL)",
+            req: { food: 1, otherSpec: 1 },
+            reqText: "1 🌾 Lúa + 1 📦 Đặc sản vùng khác",
+            rewardPoints: 2,
+            rewardCoins: 2,
+            flavor: "Trao đổi đặc sản liên vùng tại trung tâm kinh tế sông nước Cửu Long."
+        },
+        {
+            id: "pq_cl_wood_2",
+            title: "Đóng Đội Tàu Tuần Tra Vịnh Bắc Bộ",
+            portRegionId: 0,
+            portLabel: "Thương Cảng Cái Lân (TD & MN Bắc Bộ)",
+            req: { wood: 2 },
+            reqText: "2 🌲 Gỗ",
+            rewardPoints: 2,
+            rewardCoins: 2,
+            flavor: "Bổ sung gỗ quý đóng mới các tàu vận tải biển tại Quảng Ninh."
+        },
+        {
+            id: "pq_qn_spec_food",
+            title: "Kết Nối Nông Sản Cao Nguyên",
+            portRegionId: 3,
+            portLabel: "Thương Cảng Quy Nhơn (Tây Nguyên – NTB)",
+            req: { food: 2, otherSpec: 1 },
+            reqText: "2 🌾 Lúa + 1 📦 Đặc sản vùng khác",
+            rewardPoints: 3,
+            rewardCoins: 1,
+            flavor: "Tiếp tế lương thực và trao đổi đặc sản vùng miền tại cảng Quy Nhơn."
+        }
+    ],
+
+    // ========================================================================
+    // 8 SECRET TACTICAL QUESTS (NHIỆM VỤ BÍ MẬT — 2 THẺ RIÊNG / NGƯỜI, GIẤU ĐIỂM)
+    // ========================================================================
+    secretQuestsPool: [
+        {
+            id: "sq_p2p_2",
+            title: "Nhà Thương Lượng Biển Đông",
+            desc: "Thực hiện thành công 2 giao dịch P2P (mua hoặc bán với thuyền trưởng khác).",
+            type: "p2p_count",
+            target: 2,
+            rewardPoints: 2,
+            icon: "🤝"
+        },
+        {
+            id: "sq_mine_all_3",
+            title: "Bậc Thầy Khai Khoáng",
+            desc: "Khai thác đủ cả 3 loại tài nguyên: 🌾 Lúa, 🌲 Gỗ và ⛏️ Sắt.",
+            type: "mine_types",
+            target: 3,
+            rewardPoints: 2,
+            icon: "⛏️"
+        },
+        {
+            id: "sq_survive_storm",
+            title: "Bản Lĩnh Vượt Bão Tố",
+            desc: "Vượt qua 1 pha Giông Bão hoặc Siêu Bão Yagi mà không bị mất HP.",
+            type: "survive_storm",
+            target: 1,
+            rewardPoints: 2,
+            icon: "⛈️"
+        },
+        {
+            id: "sq_sell_2_regions",
+            title: "Thương Gia Xuyên Việt",
+            desc: "Bán Đặc sản tại 2 vùng kinh tế khác nhau trên bản đồ chữ S.",
+            type: "sell_spec_regions",
+            target: 2,
+            rewardPoints: 2,
+            icon: "📦"
+        },
+        {
+            id: "sq_visit_3_ports",
+            title: "Hải Trình Liên Cảng",
+            desc: "Cập bến giao dịch tại 3 Thương Cảng khác nhau dọc đất nước.",
+            type: "visit_ports",
+            target: 3,
+            rewardPoints: 2,
+            icon: "⚓"
+        },
+        {
+            id: "sq_quiz_2",
+            title: "Học Giả Địa Lý",
+            desc: "Trả lời chính xác 2 câu hỏi Địa lý (Khai thác / Di tích / Bão).",
+            type: "quiz_correct",
+            target: 2,
+            rewardPoints: 2,
+            icon: "📚"
+        },
+        {
+            id: "sq_buy_spec_2",
+            title: "Sưu Tầm Đặc Sản Vùng Miền",
+            desc: "Nhập 2 kiện Đặc sản bản địa tại các Thương Cảng.",
+            type: "buy_spec",
+            target: 2,
+            rewardPoints: 2,
+            icon: "🛒"
+        },
+        {
+            id: "sq_safe_turns_2",
+            title: "Hải Quân Vững Vàng",
+            desc: "Kết thúc 2 lượt đi với trạng thái thân tàu nguyên vẹn (5/5 ❤️ HP).",
+            type: "full_hp_turns",
+            target: 2,
+            rewardPoints: 2,
+            icon: "🛡️"
         }
     ]
 };

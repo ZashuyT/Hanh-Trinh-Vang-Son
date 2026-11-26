@@ -28,9 +28,14 @@ class World3D {
 
         this.cloudsVisible = true;
         this.minimalistMode = false;
+        this.graphicsQuality = "pretty"; // 'pretty' ("✨ Đẹp (Tối ưu)") | 'smooth' ("⚡ Siêu Mượt")
         this.cameraLockEnabled = false;
         this.cameraLockShipKey = null;
         this.weatherMode = "sunny";
+        this._frameCount = 0;
+        this._lastCamSig = "";
+        this._lastShipSig = "";
+        this._hasActiveLabelFade = true;
 
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
@@ -52,10 +57,18 @@ class World3D {
         return `id_${player.id !== undefined ? player.id : fallbackIdx}`;
     }
 
+    getOptimalPixelRatio() {
+        if (this.graphicsQuality === "smooth") return 1;
+        const ua = (typeof navigator !== "undefined" && navigator.userAgent) ? navigator.userAgent : "";
+        const isMobile = /Android|iPhone|iPad|iPod|Mobi/i.test(ua) || (typeof window !== "undefined" && window.innerWidth <= 900);
+        const cap = isMobile ? 1.25 : 1.5;
+        return Math.min((typeof window !== "undefined" && window.devicePixelRatio) || 1, cap);
+    }
+
     initScene() {
         this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color(0x0b3954);
-        this.scene.fog = new THREE.FogExp2(0x0d4768, 0.0028);
+        this.scene.background = new THREE.Color(0x38bdf8);
+        this.scene.fog = new THREE.Fog(0xbae6fd, 210, 480);
 
         const w = this.container.clientWidth || window.innerWidth;
         const h = this.container.clientHeight || window.innerHeight;
@@ -68,11 +81,11 @@ class World3D {
             powerPreference: "high-performance"
         });
         this.renderer.setSize(w, h);
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+        this.renderer.setPixelRatio(this.getOptimalPixelRatio());
         this.renderer.shadowMap.enabled = true;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        this.renderer.toneMappingExposure = 1.18;
+        this.renderer.toneMappingExposure = 1.08;
         this.container.innerHTML = "";
         this.container.appendChild(this.renderer.domElement);
 
@@ -91,29 +104,25 @@ class World3D {
         this.controls.maxDistance = 225;
         this.controls.target.set(0, 0, 2);
 
-        // Rich Tropical Daylight + Warm Golden Sun + Cool Ocean Rim Light
-        this.hemiLight = new THREE.HemisphereLight(0xfffbeb, 0x0369a1, 1.08);
+        // Bright, Crisp Daytime Lighting: Sunny baseline (Hemi #f0f9ff/#38bdf8 0.95, Sun #fffcf0 1.45)
+        this.hemiLight = new THREE.HemisphereLight(0xf0f9ff, 0x38bdf8, 0.95);
         this.hemiLight.position.set(0, 120, 0);
         this.scene.add(this.hemiLight);
 
-        this.sunLight = new THREE.DirectionalLight(0xfff3c4, 1.55);
-        this.sunLight.position.set(64, 118, 56);
+        this.sunLight = new THREE.DirectionalLight(0xfffcf0, 1.45);
+        this._baseSunIntensity = 1.45;
+        this.sunLight.position.set(62, 72, -72);
         this.sunLight.castShadow = true;
-        this.sunLight.shadow.mapSize.width = 2048;
-        this.sunLight.shadow.mapSize.height = 2048;
-        this.sunLight.shadow.camera.near = 5;
-        this.sunLight.shadow.camera.far = 290;
-        const d = 115;
-        this.sunLight.shadow.camera.left = -d;
-        this.sunLight.shadow.camera.right = d;
-        this.sunLight.shadow.camera.top = d;
-        this.sunLight.shadow.camera.bottom = -d;
-        this.sunLight.shadow.bias = -0.00045;
+        this.sunLight.shadow.mapSize.width = 1024;
+        this.sunLight.shadow.mapSize.height = 1024;
+        this.sunLight.shadow.camera.near = 20;
+        this.sunLight.shadow.camera.far = 210;
+        this.sunLight.shadow.camera.left = -58;
+        this.sunLight.shadow.camera.right = 58;
+        this.sunLight.shadow.camera.top = 68;
+        this.sunLight.shadow.camera.bottom = -68;
+        this.sunLight.shadow.bias = -0.0005;
         this.scene.add(this.sunLight);
-
-        this.rimLight = new THREE.DirectionalLight(0x38bdf8, 0.58);
-        this.rimLight.position.set(-72, 48, -62);
-        this.scene.add(this.rimLight);
 
         this.boardGroup = new THREE.Group();
         this.scene.add(this.boardGroup);
@@ -129,41 +138,197 @@ class World3D {
         this.weatherGroup = new THREE.Group();
         this.scene.add(this.weatherGroup);
 
-        this.clouds = [];
-        const cloudMat = new THREE.MeshStandardMaterial({
-            color: 0xffffff,
-            roughness: 0.88,
+        // 1. Lightweight Gradient Sky Dome (1 single SphereGeometry mesh, BackSide, depthWrite: false, fog: false)
+        this.skyDomeCanvas = document.createElement("canvas");
+        this.skyDomeCanvas.width = 32;
+        this.skyDomeCanvas.height = 256;
+        this.skyDomeCtx = this.skyDomeCanvas.getContext("2d");
+        this.skyDomeTexture = new THREE.CanvasTexture(this.skyDomeCanvas);
+        if (THREE.ClampToEdgeWrapping !== undefined) {
+            this.skyDomeTexture.wrapS = THREE.ClampToEdgeWrapping;
+            this.skyDomeTexture.wrapT = THREE.ClampToEdgeWrapping;
+        }
+        const skyDomeGeo = new THREE.SphereGeometry(420, 24, 16);
+        const skyDomeMat = new THREE.MeshBasicMaterial({
+            map: this.skyDomeTexture,
+            side: THREE.BackSide,
+            depthWrite: false,
+            fog: false
+        });
+        this.skyDomeMesh = new THREE.Mesh(skyDomeGeo, skyDomeMat);
+        this.skyDomeMesh.renderOrder = -100;
+        this.weatherGroup.add(this.skyDomeMesh);
+
+        // 1b. Lightweight 3D Sun Group (1 Core Sphere r=10 + 1 Radial-Gradient Additive Sprite, zero PointLight, fog: false)
+        this.sunGroup = new THREE.Group();
+        const sunCoreGeo = new THREE.SphereGeometry(10, 16, 12);
+        this.sunCoreMat = new THREE.MeshBasicMaterial({
+            color: 0xfffef0,
             transparent: true,
-            opacity: 0.58
+            opacity: 1.0,
+            fog: false
+        });
+        this.sunCoreMesh = new THREE.Mesh(sunCoreGeo, this.sunCoreMat);
+        this.sunCoreMesh.castShadow = false;
+        this.sunCoreMesh.receiveShadow = false;
+        this.sunCoreMesh.renderOrder = -50;
+        this.sunGroup.add(this.sunCoreMesh);
+
+        const glowCanvas = document.createElement("canvas");
+        glowCanvas.width = 128;
+        glowCanvas.height = 128;
+        const glowCtx = glowCanvas.getContext ? glowCanvas.getContext("2d") : null;
+        if (glowCtx && typeof glowCtx.createRadialGradient === "function" && typeof glowCtx.fillRect === "function") {
+            const gGrad = glowCtx.createRadialGradient(64, 64, 4, 64, 64, 62);
+            gGrad.addColorStop(0.0, "rgba(255, 255, 255, 1.0)");
+            gGrad.addColorStop(0.28, "rgba(255, 255, 255, 0.78)");
+            gGrad.addColorStop(0.62, "rgba(255, 255, 255, 0.25)");
+            gGrad.addColorStop(1.0, "rgba(255, 255, 255, 0.0)");
+            glowCtx.fillStyle = gGrad;
+            glowCtx.fillRect(0, 0, 128, 128);
+        }
+        const glowTex = new THREE.CanvasTexture(glowCanvas);
+        this.sunGlowMat = new THREE.SpriteMaterial({
+            map: glowTex,
+            color: 0xfef08a,
+            transparent: true,
+            opacity: 0.85,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            fog: false
+        });
+        this.sunGlowSprite = new THREE.Sprite(this.sunGlowMat);
+        this.sunGlowSprite.scale.set(60, 60, 1);
+        this.sunGlowSprite.renderOrder = -49;
+        this.sunGroup.add(this.sunGlowSprite);
+        this.sunGroup.position.set(105, 52, -155);
+        this.weatherGroup.add(this.sunGroup);
+
+        // Pre-allocated weather lerp buffers (zero allocation inside render loop)
+        this._weatherInitialized = false;
+        this._weatherLerpElapsed = 2.0;
+        this._weatherLerpDuration = 2.0;
+        this._curSkyTop = new THREE.Color(0x38bdf8);
+        this._curSkyMid = new THREE.Color(0x7dd3fc);
+        this._curSkyBot = new THREE.Color(0xe0f7ff);
+        this._tmpSkyTop = new THREE.Color();
+        this._tmpSkyMid = new THREE.Color();
+        this._tmpSkyBot = new THREE.Color();
+        this._nextLightningAt = 0;
+        this._lightningEndAt = 0;
+
+        this._weatherFrom = {
+            bg: new THREE.Color(0x38bdf8),
+            fog: new THREE.Color(0xbae6fd),
+            skyTop: new THREE.Color(0x38bdf8),
+            skyMid: new THREE.Color(0x7dd3fc),
+            skyBot: new THREE.Color(0xe0f7ff),
+            oceanCol: new THREE.Color(0x0ea5c6),
+            oceanEm: new THREE.Color(0x0369a1),
+            oceanEmInt: 0.25,
+            hemiSky: new THREE.Color(0xf0f9ff),
+            hemiGround: new THREE.Color(0x38bdf8),
+            hemiInt: 0.95,
+            sunCol: new THREE.Color(0xfffcf0),
+            sunInt: 1.45,
+            sunPos: new THREE.Vector3(62, 72, -72),
+            sunObjPos: new THREE.Vector3(105, 52, -155),
+            sunObjScale: 1.0,
+            sunCoreCol: new THREE.Color(0xfffef0),
+            sunGlowCol: new THREE.Color(0xfef08a),
+            sunCoreOp: 1.0,
+            sunGlowOp: 0.85,
+            cloudCol: new THREE.Color(0xffffff),
+            cloudOp: 0.85,
+            starsOp: 0.0,
+            rainOp: 0.0,
+            waveAmp: 1.0
+        };
+        this._weatherTo = {
+            bg: new THREE.Color(0x38bdf8),
+            fog: new THREE.Color(0xbae6fd),
+            skyTop: new THREE.Color(0x38bdf8),
+            skyMid: new THREE.Color(0x7dd3fc),
+            skyBot: new THREE.Color(0xe0f7ff),
+            oceanCol: new THREE.Color(0x0ea5c6),
+            oceanEm: new THREE.Color(0x0369a1),
+            oceanEmInt: 0.25,
+            hemiSky: new THREE.Color(0xf0f9ff),
+            hemiGround: new THREE.Color(0x38bdf8),
+            hemiInt: 0.95,
+            sunCol: new THREE.Color(0xfffcf0),
+            sunInt: 1.45,
+            sunPos: new THREE.Vector3(62, 72, -72),
+            sunObjPos: new THREE.Vector3(105, 52, -155),
+            sunObjScale: 1.0,
+            sunCoreCol: new THREE.Color(0xfffef0),
+            sunGlowCol: new THREE.Color(0xfef08a),
+            sunCoreOp: 1.0,
+            sunGlowOp: 0.85,
+            cloudCol: new THREE.Color(0xffffff),
+            cloudOp: 0.85,
+            starsOp: 0.0,
+            rainOp: 0.0,
+            waveAmp: 1.0
+        };
+        this.updateSkyDomeGradient(this._curSkyTop, this._curSkyMid, this._curSkyBot);
+
+        // Soft Low-Poly Clouds (3-5 squashed Icosahedron puffs per cloud, 1 InstancedMesh!)
+        // Positioned along outer sea & continental margins so they NEVER obscure Monuments or Trade Ports!
+        this.clouds = [];
+        this.cloudPuffs = [];
+        const cloudMat = new THREE.MeshLambertMaterial({
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.85,
+            flatShading: true
         });
 
-        for (let i = 0; i < 14; i++) {
-            const cGroup = new THREE.Group();
-            const puffCount = 3 + (i % 3);
+        const cloudSlots = [
+            { x: -62, z: -48, y: 18 }, { x: 54, z: -46, y: 19 },
+            { x: -56, z: -20, y: 21 }, { x: 64, z: -18, y: 20 },
+            { x: -58, z: 12,  y: 19 }, { x: 66, z: 16,  y: 21 },
+            { x: -52, z: 42,  y: 20 }, { x: 56, z: 44,  y: 18 },
+            { x: -18, z: -58, y: 22 }, { x: 24, z: 58,  y: 20 },
+            { x: 46,  z: -32, y: 23 }, { x: -46, z: 28, y: 22 }
+        ];
+        cloudSlots.forEach((slot, i) => {
+            const puffCount = 3 + (i % 3); // 3 to 5 puffs per cloud
+            const cloudObj = {
+                x: slot.x,
+                y: slot.y,
+                z: slot.z,
+                speed: 0.36 + (i % 4) * 0.10,
+                bobOffset: i * 1.15,
+                puffs: []
+            };
             for (let p = 0; p < puffCount; p++) {
-                const puffGeo = new THREE.DodecahedronGeometry(1.15 + Math.random() * 1.0, 1);
-                puffGeo.scale(1.4, 0.48, 1.0);
-                const puff = new THREE.Mesh(puffGeo, cloudMat);
-                puff.position.set(
-                    (p - puffCount / 2) * 1.3,
-                    (Math.random() - 0.5) * 0.25,
-                    (Math.random() - 0.5) * 0.8
-                );
-                cGroup.add(puff);
+                const s = 1.25 + ((p === 1 || p === 2) ? 0.55 : 0.15) + (i % 2) * 0.2;
+                const puffInfo = {
+                    cloud: cloudObj,
+                    ox: (p - (puffCount - 1) / 2) * 1.45,
+                    oy: (p % 2 === 0 ? -0.10 : 0.18),
+                    oz: ((p % 3) - 1) * 0.65,
+                    sx: s * 1.55,
+                    sy: s * 0.44,
+                    sz: s * 1.05,
+                    instanceIdx: this.cloudPuffs.length
+                };
+                cloudObj.puffs.push(puffInfo);
+                this.cloudPuffs.push(puffInfo);
             }
-            const sideZ = (i % 2 === 0 ? 1 : -1) * (34 + Math.random() * 34);
-            cGroup.position.set(
-                (Math.random() - 0.5) * 145,
-                22 + Math.random() * 11,
-                sideZ
-            );
-            cGroup.visible = this.cloudsVisible;
-            this.weatherGroup.add(cGroup);
-            this.clouds.push({
-                mesh: cGroup,
-                speed: 0.45 + Math.random() * 0.65,
-                bobOffset: Math.random() * Math.PI * 2
-            });
+            this.clouds.push(cloudObj);
+        });
+
+        if (typeof THREE.InstancedMesh === "function") {
+            const unitPuffGeo = new THREE.IcosahedronGeometry(1.0, 0);
+            this.cloudInstancedMesh = new THREE.InstancedMesh(unitPuffGeo, cloudMat, this.cloudPuffs.length);
+            this.cloudInstancedMesh.visible = this.cloudsVisible;
+            this.cloudDummy = new THREE.Object3D();
+            this.updateCloudInstances(0);
+            this.weatherGroup.add(this.cloudInstancedMesh);
+        } else {
+            this.cloudInstancedMesh = null;
         }
         this.cloudMaterial = cloudMat;
 
@@ -178,11 +343,11 @@ class World3D {
         starGeo.setAttribute("position", new THREE.BufferAttribute(starPos, 3));
         this.starField = new THREE.Points(
             starGeo,
-            new THREE.PointsMaterial({ color: 0xfef08a, size: 0.48, transparent: true, opacity: 0.0 })
+            new THREE.PointsMaterial({ color: 0xfef9c3, size: 0.48, transparent: true, opacity: 0.0 })
         );
         this.weatherGroup.add(this.starField);
 
-        // Rain Particle Field for Tropical Rain / Thunderstorm / Super Typhoon Yagi
+        // Unified Rain & Storm Particle Field (1 THREE.Points with BufferGeometry)
         const rainCount = 650;
         const rainGeo = new THREE.BufferGeometry();
         const rainPos = new Float32Array(rainCount * 3);
@@ -199,14 +364,57 @@ class World3D {
         this.weatherGroup.add(this.rainField);
     }
 
+    updateCloudInstances(elapsed) {
+        if (!this.cloudInstancedMesh || !this.cloudDummy) return;
+        const dummy = this.cloudDummy;
+        for (let i = 0; i < this.cloudPuffs.length; i++) {
+            const pf = this.cloudPuffs[i];
+            const c = pf.cloud;
+            dummy.position.set(c.x + pf.ox, c.y + pf.oy, c.z + pf.oz);
+            dummy.scale.set(pf.sx, pf.sy, pf.sz);
+            dummy.updateMatrix();
+            this.cloudInstancedMesh.setMatrixAt(i, dummy.matrix);
+        }
+        this.cloudInstancedMesh.instanceMatrix.needsUpdate = true;
+    }
+
     toggleClouds() {
         this.cloudsVisible = !this.cloudsVisible;
-        if (this.clouds) {
-            this.clouds.forEach(c => {
-                if (c.mesh) c.mesh.visible = this.cloudsVisible;
-            });
+        if (this.cloudInstancedMesh) {
+            this.cloudInstancedMesh.visible = this.cloudsVisible && this.graphicsQuality !== "smooth";
         }
         return this.cloudsVisible;
+    }
+
+    toggleGraphicsQuality() {
+        const nextMode = this.graphicsQuality === "smooth" ? "pretty" : "smooth";
+        return this.setGraphicsQuality(nextMode);
+    }
+
+    setGraphicsQuality(mode) {
+        const isSmooth = mode === "smooth";
+        this.graphicsQuality = isSmooth ? "smooth" : "pretty";
+
+        // 1. PixelRatio (1 in smooth mode, <=1.5 PC / <=1.25 mobile in pretty mode)
+        if (this.renderer) {
+            this.renderer.setPixelRatio(this.getOptimalPixelRatio());
+            this.renderer.shadowMap.enabled = !isSmooth;
+            if (this.renderer.shadowMap) {
+                this.renderer.shadowMap.needsUpdate = true;
+            }
+        }
+        if (this.sunLight) {
+            this.sunLight.castShadow = !isSmooth;
+        }
+
+        // 2. Clouds visibility
+        if (this.cloudInstancedMesh) {
+            this.cloudInstancedMesh.visible = !isSmooth && this.cloudsVisible;
+        }
+
+        // 3. Wildlife (birds, fish, dolphins, sampans, foam)
+        this.applyMinimalistMode();
+        return this.graphicsQuality;
     }
 
     toggleMinimalistMode() {
@@ -216,7 +424,7 @@ class World3D {
     }
 
     applyMinimalistMode() {
-        const showExtra = !this.minimalistMode;
+        const showExtra = !this.minimalistMode && this.graphicsQuality !== "smooth";
 
         // 1. Toggle ambient wildlife & outer scenery (birds, fish, dolphins, sampans, lighthouses, oil rigs)
         if (this.sceneryGroup) {
@@ -228,7 +436,7 @@ class World3D {
             });
         }
 
-        // 2. Toggle ship light pillars & lanterns in minimalist mode (while keeping ship, hull ring & local arrow visible)
+        // 2. Toggle ship light pillars & lanterns in minimalist/smooth mode (while keeping ship, hull ring & local arrow visible)
         if (this.shipMeshes) {
             this.shipMeshes.forEach(ship => {
                 if (ship.userData) {
@@ -261,65 +469,228 @@ class World3D {
         return this.cameraLockEnabled;
     }
 
-    setWeatherMode(mode) {
+    updateSkyDomeGradient(topColor, midColor, botColor) {
+        if (!this.skyDomeCtx || typeof this.skyDomeCtx.fillRect !== "function" || !this.skyDomeCanvas || !this.skyDomeTexture) return;
+        const ctx = this.skyDomeCtx;
+        const w = this.skyDomeCanvas.width;
+        const h = this.skyDomeCanvas.height;
+        const grad = ctx.createLinearGradient(0, 0, 0, h);
+        const toCss = (c, fallback) => {
+            if (typeof c === "string") return c;
+            if (c && typeof c.getStyle === "function") return c.getStyle();
+            if (c && typeof c.getHexString === "function") return "#" + c.getHexString();
+            return fallback;
+        };
+        const topStyle = toCss(topColor, "#2e86de");
+        const midStyle = toCss(midColor, "#73b8ef");
+        const botStyle = toCss(botColor, "#b8e9ff");
+        // Sphere UV: y=0% is zenith (top), y=52% is exact horizon, 52%..100% solid horizon/sea match
+        grad.addColorStop(0.0, topStyle);
+        grad.addColorStop(0.30, midStyle);
+        grad.addColorStop(0.52, botStyle);
+        grad.addColorStop(1.0, botStyle);
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+        this.skyDomeTexture.needsUpdate = true;
+    }
+
+    setWeatherMode(mode, instant = false) {
         const validModes = new Set(["sunny", "tropical_rain", "thunderstorm", "sunset", "night", "super_typhoon_yagi"]);
         const validMode = validModes.has(mode) ? mode : "sunny";
         this.weatherMode = validMode;
         const presets = {
             sunny: {
-                bg: 0x0b3954, fog: 0x0d4768, hemiSky: 0xfffbeb, hemiGround: 0x0369a1, hemiInt: 1.08,
-                sunCol: 0xfff3c4, sunInt: 1.55, sunPos: [64, 118, 56], cloudCol: 0xffffff, cloudOp: 0.58,
-                waveAmp: 1.0, starsOp: 0.0, rainOp: 0.0
+                bg: 0x38bdf8, fog: 0xbae6fd,
+                skyTop: 0x38bdf8, skyMid: 0x7dd3fc, skyBot: 0xe0f7ff,
+                oceanCol: 0x0ea5c6, oceanEm: 0x0369a1, oceanEmInt: 0.25,
+                hemiSky: 0xf0f9ff, hemiGround: 0x38bdf8, hemiInt: 0.95,
+                sunCol: 0xfffcf0, sunInt: 1.45, sunPos: [62, 72, -72],
+                sunObjPos: [105, 52, -155], sunObjScale: 1.0,
+                sunCoreCol: 0xfffef0, sunGlowCol: 0xfef08a, sunCoreOp: 1.0, sunGlowOp: 0.85,
+                cloudCol: 0xffffff, cloudOp: 0.85, waveAmp: 1.0, starsOp: 0.0, rainOp: 0.0
             },
             tropical_rain: {
-                bg: 0x162d3d, fog: 0x1c374a, hemiSky: 0x94a3b8, hemiGround: 0x0f172a, hemiInt: 0.78,
-                sunCol: 0xcbd5e1, sunInt: 0.92, sunPos: [40, 100, 35], cloudCol: 0x64748b, cloudOp: 0.80,
-                waveAmp: 1.38, starsOp: 0.0, rainOp: 0.65
+                bg: 0x4a6572, fog: 0x8ca3b0,
+                skyTop: 0x4a6572, skyMid: 0x748c98, skyBot: 0x9fb3be,
+                oceanCol: 0x1e4e5f, oceanEm: 0x0d2530, oceanEmInt: 0.22,
+                hemiSky: 0xcbd5e1, hemiGround: 0x1e293b, hemiInt: 0.75,
+                sunCol: 0xe8f1f8, sunInt: 0.95, sunPos: [72, 76, 54],
+                sunObjPos: null, sunObjScale: 1.0,
+                sunCoreCol: 0xfffbeb, sunGlowCol: 0xfde68a, sunCoreOp: 0.0, sunGlowOp: 0.0,
+                cloudCol: 0xcbd5e1, cloudOp: 0.85, waveAmp: 1.38, starsOp: 0.0, rainOp: 0.65
             },
             thunderstorm: {
-                bg: 0x091522, fog: 0x0d1d2e, hemiSky: 0x64748b, hemiGround: 0x070e17, hemiInt: 0.62,
-                sunCol: 0x93c5fd, sunInt: 0.75, sunPos: [25, 95, 25], cloudCol: 0x334155, cloudOp: 0.88,
-                waveAmp: 1.75, starsOp: 0.15, rainOp: 0.82
+                bg: 0x1b2a41, fog: 0x3b526b,
+                skyTop: 0x1b2a41, skyMid: 0x324861, skyBot: 0x486581,
+                oceanCol: 0x123447, oceanEm: 0x071a26, oceanEmInt: 0.22,
+                hemiSky: 0x94a3b8, hemiGround: 0x0f172a, hemiInt: 0.72,
+                sunCol: 0xdbeafe, sunInt: 0.92, sunPos: [70, 74, 52],
+                sunObjPos: null, sunObjScale: 1.0,
+                sunCoreCol: 0xfffbeb, sunGlowCol: 0xfde68a, sunCoreOp: 0.0, sunGlowOp: 0.0,
+                cloudCol: 0x64748b, cloudOp: 0.90, waveAmp: 1.75, starsOp: 0.15, rainOp: 0.82
             },
             sunset: {
-                bg: 0x3b1832, fog: 0x5c233a, hemiSky: 0xfda4af, hemiGround: 0x1e1b4b, hemiInt: 0.96,
-                sunCol: 0xf97316, sunInt: 1.75, sunPos: [-78, 46, 52], cloudCol: 0xfed7aa, cloudOp: 0.68,
-                waveAmp: 1.05, starsOp: 0.42, rainOp: 0.0
+                bg: 0x4f5d95, fog: 0xfdba74,
+                skyTop: 0x4f5d95, skyMid: 0xf97316, skyBot: 0xfde047,
+                oceanCol: 0x1d5f7a, oceanEm: 0x9a3412, oceanEmInt: 0.30,
+                hemiSky: 0xfed7aa, hemiGround: 0x475569, hemiInt: 0.88,
+                sunCol: 0xffe8c8, sunInt: 1.38, sunPos: [-68, 34, -84],
+                sunObjPos: [-110, 28, -150], sunObjScale: 1.5,
+                sunCoreCol: 0xfef08a, sunGlowCol: 0xfb923c, sunCoreOp: 1.0, sunGlowOp: 0.92,
+                cloudCol: 0xffedd5, cloudOp: 0.84, waveAmp: 1.05, starsOp: 0.32, rainOp: 0.0
             },
             night: {
-                bg: 0x030c18, fog: 0x041224, hemiSky: 0x38bdf8, hemiGround: 0x020617, hemiInt: 0.52,
-                sunCol: 0x60a5fa, sunInt: 0.74, sunPos: [-45, 86, -45], cloudCol: 0x1e293b, cloudOp: 0.46,
-                waveAmp: 0.88, starsOp: 0.92, rainOp: 0.0
+                bg: 0x091428, fog: 0x16324f,
+                skyTop: 0x091428, skyMid: 0x122843, skyBot: 0x1c3d5e,
+                oceanCol: 0x0b2840, oceanEm: 0x051626, oceanEmInt: 0.22,
+                hemiSky: 0x93c5fd, hemiGround: 0x0f172a, hemiInt: 0.72,
+                sunCol: 0xe0f2fe, sunInt: 0.98, sunPos: [68, 76, 54],
+                sunObjPos: null, sunObjScale: 1.0,
+                sunCoreCol: 0xfffbeb, sunGlowCol: 0xfde68a, sunCoreOp: 0.0, sunGlowOp: 0.0,
+                cloudCol: 0x3b5575, cloudOp: 0.55, waveAmp: 0.88, starsOp: 0.95, rainOp: 0.0
             },
             super_typhoon_yagi: {
-                bg: 0x14070d, fog: 0x1e0913, hemiSky: 0xf43f5e, hemiGround: 0x090408, hemiInt: 0.65,
-                sunCol: 0xfda4af, sunInt: 0.82, sunPos: [15, 90, 20], cloudCol: 0x4c0519, cloudOp: 0.92,
-                waveAmp: 2.15, starsOp: 0.10, rainOp: 0.92
+                bg: 0x13262f, fog: 0x2b4c54,
+                skyTop: 0x13262f, skyMid: 0x244149, skyBot: 0x355c63,
+                oceanCol: 0x0c2c38, oceanEm: 0x061b24, oceanEmInt: 0.22,
+                hemiSky: 0x94a3b8, hemiGround: 0x0f242c, hemiInt: 0.72,
+                sunCol: 0xe2e8f0, sunInt: 0.95, sunPos: [72, 74, 54],
+                sunObjPos: null, sunObjScale: 1.0,
+                sunCoreCol: 0xfffbeb, sunGlowCol: 0xfde68a, sunCoreOp: 0.0, sunGlowOp: 0.0,
+                cloudCol: 0x475569, cloudOp: 0.94, waveAmp: 2.15, starsOp: 0.08, rainOp: 0.92
             }
         };
 
         const p = presets[validMode] || presets.sunny;
-        this.scene.background.setHex(p.bg);
-        this.scene.fog.color.setHex(p.fog);
-        this.hemiLight.color.setHex(p.hemiSky);
-        this.hemiLight.groundColor.setHex(p.hemiGround);
-        this.hemiLight.intensity = p.hemiInt;
-        this.sunLight.color.setHex(p.sunCol);
-        this.sunLight.intensity = p.sunInt;
-        this.sunLight.position.set(...p.sunPos);
-        this.cloudMaterial.color.setHex(p.cloudCol);
-        this.cloudMaterial.opacity = p.cloudOp;
-        this.starField.material.opacity = p.starsOp;
-        if (this.rainField) {
-            this.rainField.material.opacity = p.rainOp || 0.0;
+        const now = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+        if (validMode === "thunderstorm" || validMode === "super_typhoon_yagi") {
+            this._nextLightningAt = now + 2800 + Math.random() * 4200;
+        } else {
+            this._nextLightningAt = 0;
+            this._lightningEndAt = 0;
         }
-        this.waveMultiplier = p.waveAmp;
+
+        // Apply immediately on first init or when instant=true; otherwise smooth 2s lerp in render loop
+        if (instant || !this._weatherInitialized) {
+            this._weatherInitialized = true;
+            this._weatherLerpElapsed = this._weatherLerpDuration;
+            this.scene.background.setHex(p.bg);
+            this.scene.fog.color.setHex(p.fog);
+            this._curSkyTop.setHex(p.skyTop);
+            this._curSkyMid.setHex(p.skyMid);
+            this._curSkyBot.setHex(p.skyBot);
+            this.updateSkyDomeGradient(this._curSkyTop, this._curSkyMid, this._curSkyBot);
+            if (this.oceanMesh && this.oceanMesh.material) {
+                this.oceanMesh.material.color.setHex(p.oceanCol);
+                if (this.oceanMesh.material.emissive) this.oceanMesh.material.emissive.setHex(p.oceanEm);
+                this.oceanMesh.material.emissiveIntensity = p.oceanEmInt;
+            }
+            this.hemiLight.color.setHex(p.hemiSky);
+            this.hemiLight.groundColor.setHex(p.hemiGround);
+            this.hemiLight.intensity = p.hemiInt;
+            this.sunLight.color.setHex(p.sunCol);
+            this.sunLight.intensity = p.sunInt;
+            this._baseSunIntensity = p.sunInt;
+            this.sunLight.position.set(...p.sunPos);
+            if (this.sunGroup && this.sunCoreMat && this.sunGlowMat) {
+                if (p.sunObjPos) this.sunGroup.position.set(...p.sunObjPos);
+                this.sunGroup.scale.setScalar(p.sunObjScale);
+                this.sunCoreMat.color.setHex(p.sunCoreCol);
+                this.sunCoreMat.opacity = p.sunCoreOp;
+                this.sunGlowMat.color.setHex(p.sunGlowCol);
+                this.sunGlowMat.opacity = p.sunGlowOp;
+                this.sunGroup.visible = (p.sunCoreOp > 0.01 || p.sunGlowOp > 0.01);
+            }
+            this.cloudMaterial.color.setHex(p.cloudCol);
+            this.cloudMaterial.opacity = p.cloudOp;
+            this.starField.material.opacity = p.starsOp;
+            if (this.rainField) this.rainField.material.opacity = p.rainOp || 0.0;
+            this.waveMultiplier = p.waveAmp;
+            return;
+        }
+
+        // Snapshot current live state into _weatherFrom
+        const f = this._weatherFrom;
+        f.bg.copy(this.scene.background);
+        f.fog.copy(this.scene.fog.color);
+        f.skyTop.copy(this._curSkyTop);
+        f.skyMid.copy(this._curSkyMid);
+        f.skyBot.copy(this._curSkyBot);
+        if (this.oceanMesh && this.oceanMesh.material) {
+            f.oceanCol.copy(this.oceanMesh.material.color);
+            if (this.oceanMesh.material.emissive) f.oceanEm.copy(this.oceanMesh.material.emissive);
+            f.oceanEmInt = this.oceanMesh.material.emissiveIntensity || 0.22;
+        }
+        f.hemiSky.copy(this.hemiLight.color);
+        f.hemiGround.copy(this.hemiLight.groundColor);
+        f.hemiInt = this.hemiLight.intensity;
+        f.sunCol.copy(this.sunLight.color);
+        f.sunInt = this._baseSunIntensity !== undefined ? this._baseSunIntensity : this.sunLight.intensity;
+        f.sunPos.copy(this.sunLight.position);
+        if (this.sunGroup && this.sunCoreMat && this.sunGlowMat) {
+            f.sunObjPos.copy(this.sunGroup.position);
+            f.sunObjScale = this.sunGroup.scale.x || 1.0;
+            f.sunCoreCol.copy(this.sunCoreMat.color);
+            f.sunGlowCol.copy(this.sunGlowMat.color);
+            f.sunCoreOp = this.sunCoreMat.opacity;
+            f.sunGlowOp = this.sunGlowMat.opacity;
+        }
+        f.cloudCol.copy(this.cloudMaterial.color);
+        f.cloudOp = this.cloudMaterial.opacity;
+        f.starsOp = this.starField.material.opacity;
+        f.rainOp = this.rainField ? this.rainField.material.opacity : 0.0;
+        f.waveAmp = this.waveMultiplier || 1.0;
+
+        // Populate _weatherTo target state
+        const t = this._weatherTo;
+        t.bg.setHex(p.bg);
+        t.fog.setHex(p.fog);
+        t.skyTop.setHex(p.skyTop);
+        t.skyMid.setHex(p.skyMid);
+        t.skyBot.setHex(p.skyBot);
+        t.oceanCol.setHex(p.oceanCol);
+        t.oceanEm.setHex(p.oceanEm);
+        t.oceanEmInt = p.oceanEmInt;
+        t.hemiSky.setHex(p.hemiSky);
+        t.hemiGround.setHex(p.hemiGround);
+        t.hemiInt = p.hemiInt;
+        t.sunCol.setHex(p.sunCol);
+        t.sunInt = p.sunInt;
+        t.sunPos.set(...p.sunPos);
+        if (p.sunObjPos) {
+            t.sunObjPos.set(...p.sunObjPos);
+            t.sunObjScale = p.sunObjScale;
+            t.sunCoreCol.setHex(p.sunCoreCol);
+            t.sunGlowCol.setHex(p.sunGlowCol);
+            // If sun was previously hidden (night/storm), fade it in right at the target East/West position
+            if (f.sunCoreOp < 0.02 && f.sunGlowOp < 0.02) {
+                f.sunObjPos.copy(t.sunObjPos);
+                f.sunObjScale = t.sunObjScale;
+                f.sunCoreCol.copy(t.sunCoreCol);
+                f.sunGlowCol.copy(t.sunGlowCol);
+            }
+        } else {
+            // Fading out to clouds/night: keep current position & color so sun dims smoothly in place
+            t.sunObjPos.copy(f.sunObjPos);
+            t.sunObjScale = f.sunObjScale;
+            t.sunCoreCol.copy(f.sunCoreCol);
+            t.sunGlowCol.copy(f.sunGlowCol);
+        }
+        t.sunCoreOp = p.sunCoreOp;
+        t.sunGlowOp = p.sunGlowOp;
+        t.cloudCol.setHex(p.cloudCol);
+        t.cloudOp = p.cloudOp;
+        t.starsOp = p.starsOp;
+        t.rainOp = p.rainOp || 0.0;
+        t.waveAmp = p.waveAmp;
+
+        this._weatherLerpElapsed = 0.0;
     }
 
     initOcean() {
         this.waveMultiplier = 1.0;
-        // 72x72 dynamic 3D wave mesh gives rich rolling 3D waves at silky-smooth 60 FPS
-        const oceanGeo = new THREE.PlaneGeometry(340, 340, 72, 72);
+        // 48x48 dynamic 3D wave mesh (2,401 vertices) gives rich rolling waves with 55% less CPU cost
+        const oceanGeo = new THREE.PlaneGeometry(340, 340, 48, 48);
         oceanGeo.rotateX(-Math.PI / 2);
 
         const pos = oceanGeo.attributes.position;
@@ -329,11 +700,11 @@ class World3D {
         }
 
         const oceanMat = new THREE.MeshStandardMaterial({
-            color: 0x0284c7,
-            emissive: 0x042f49,
-            emissiveIntensity: 0.34,
-            roughness: 0.20,
-            metalness: 0.38,
+            color: 0x0ea5c6,
+            emissive: 0x0369a1,
+            emissiveIntensity: 0.25,
+            roughness: 0.30,
+            metalness: 0.25,
             flatShading: false
         });
 
@@ -374,10 +745,173 @@ class World3D {
             });
         }
 
+        this.initWakePool();
         this.initAmbientOceanScenery();
     }
 
+    // ------------------------------------------------------------------------
+    // OBJECT-POOLED V-SHAPED SHIP WAKE FOAM (ZERO ALLOCATION IN RENDER LOOP!)
+    // ------------------------------------------------------------------------
+    initWakePool() {
+        this.wakePool = [];
+        this.wakePoolCursor = 0;
+        const poolSize = 48;
+        const sharedGeo = new THREE.RingGeometry(0.10, 0.24, 10);
+        sharedGeo.rotateX(-Math.PI / 2);
+
+        for (let i = 0; i < poolSize; i++) {
+            const mat = new THREE.MeshBasicMaterial({
+                color: 0xf0f9ff,
+                transparent: true,
+                opacity: 0.0,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            const mesh = new THREE.Mesh(sharedGeo, mat);
+            mesh.visible = false;
+            this.effectsGroup.add(mesh);
+            this.wakePool.push({
+                mesh,
+                mat,
+                active: false,
+                birth: 0,
+                life: 800,
+                vx: 0,
+                vz: 0,
+                initScale: 1.0
+            });
+        }
+    }
+
+    spawnWakeParticle(x, y, z, yawRad = 0, speedNorm = 1.0) {
+        if (!this.wakePool || this.wakePool.length === 0) return;
+        const now = performance.now();
+        // Ship forward vector is (+cos(yaw), -sin(yaw)); stern is behind it
+        const fwdX = Math.cos(yawRad);
+        const fwdZ = -Math.sin(yawRad);
+        const rightX = -fwdZ;
+        const rightZ = fwdX;
+        const sternX = x - fwdX * 1.15;
+        const sternZ = z - fwdZ * 1.15;
+
+        // Emit a V-shaped pair (left & right wake arms) behind the stern
+        [-1, 1].forEach((side) => {
+            const p = this.wakePool[this.wakePoolCursor];
+            this.wakePoolCursor = (this.wakePoolCursor + 1) % this.wakePool.length;
+            p.active = true;
+            p.birth = now;
+            p.life = 800;
+            p.initScale = 0.85 + speedNorm * 0.25;
+            p.vx = (-fwdX * 0.55 + rightX * side * 0.85) * (0.65 + speedNorm * 0.45);
+            p.vz = (-fwdZ * 0.55 + rightZ * side * 0.85) * (0.65 + speedNorm * 0.45);
+            p.mesh.position.set(sternX + rightX * side * 0.22, y + 0.03, sternZ + rightZ * side * 0.22);
+            p.mesh.scale.set(p.initScale, 1, p.initScale);
+            p.mat.opacity = 0.72;
+            p.mesh.visible = true;
+        });
+    }
+
     initAmbientOceanScenery() {
+        // Static Outer Sea Chart & Muted Border Terrain (always visible, zero raycast, castShadow: false)
+        this.seaChartGroup = new THREE.Group();
+        this.scene.add(this.seaChartGroup);
+
+        // 1A. Flat Compass Rose (N-E-S-W) in open NE sea corner outside hex grid (y = 0.01, opacity ~0.36)
+        const seaCompass = ProceduralModels.createSeaCompassRoseOverlay();
+        seaCompass.position.set(50, 0.01, -46);
+        this.seaChartGroup.add(seaCompass);
+
+        // 1B. Ultra-thin, faint Latitude & Longitude Nautical Grid (opacity ~0.12, merged into 1 static mesh)
+        const gridGroup = new THREE.Group();
+        const gridLineMat = new THREE.MeshBasicMaterial({
+            color: 0xf5e6c4,
+            transparent: true,
+            opacity: 0.12,
+            depthWrite: false,
+            side: THREE.DoubleSide
+        });
+        for (let coord = -108; coord <= 108; coord += 18) {
+            const latBar = new THREE.Mesh(new THREE.PlaneGeometry(216, 0.12), gridLineMat);
+            latBar.rotation.x = -Math.PI / 2;
+            latBar.position.set(0, 0.006, coord);
+            const lonBar = new THREE.Mesh(new THREE.PlaneGeometry(0.12, 216), gridLineMat);
+            lonBar.rotation.x = -Math.PI / 2;
+            lonBar.position.set(coord, 0.006, 0);
+            gridGroup.add(latBar, lonBar);
+        }
+        const mergedGrid = ProceduralModels.mergeStaticMeshesByMaterial(gridGroup, new Set(), { castShadow: false, flatShading: false });
+        this.seaChartGroup.add(mergedGrid || gridGroup);
+
+        // 2. Muted Low-Poly Border Terrain along West & North edges (outside hex grid, fades into THREE.Fog)
+        const borderClusters = [
+            { x: -34, z: -58, sx: 2.2, sy: 1.0, sz: 1.8, rot: 0.3 },
+            { x: -8,  z: -62, sx: 2.5, sy: 1.1, sz: 1.7, rot: 1.1 },
+            { x: 18,  z: -59, sx: 2.1, sy: 0.9, sz: 1.6, rot: 2.2 },
+            { x: -46, z: -38, sx: 1.9, sy: 1.0, sz: 2.2, rot: 0.8 },
+            { x: -44, z: -14, sx: 1.8, sy: 0.9, sz: 2.1, rot: 1.9 },
+            { x: -46, z: 12,  sx: 1.9, sy: 0.85, sz: 2.0, rot: 2.6 }
+        ];
+        borderClusters.forEach((bc, idx) => {
+            const ridge = ProceduralModels.createMutedBorderTerrainCluster(idx + 11);
+            ridge.position.set(bc.x, -0.22, bc.z);
+            ridge.scale.set(bc.sx, bc.sy, bc.sz);
+            ridge.rotation.y = bc.rot;
+            this.seaChartGroup.add(ridge);
+        });
+
+        // 3A. 4 Sparse Decorative Outer-Sea Coral/Rock Islets (far outside playable hex grid)
+        const outerIslets = [
+            { x: 48,  z: -22, sc: 0.95, rot: 0.4 },
+            { x: 58,  z: 4,   sc: 1.05, rot: 1.8 },
+            { x: 44,  z: 52,  sc: 0.90, rot: 2.5 },
+            { x: -46, z: 42,  sc: 0.92, rot: 1.1 }
+        ];
+        outerIslets.forEach((islet, idx) => {
+            const mesh = ProceduralModels.createOuterCoralIsletCluster(idx + 21);
+            mesh.position.set(islet.x, -0.18, islet.z);
+            mesh.scale.setScalar(islet.sc);
+            mesh.rotation.y = islet.rot;
+            this.seaChartGroup.add(mesh);
+        });
+
+        // 3B. Dashed International Shipping Lane along far SE outer sea (cream-white, opacity ~0.28)
+        const lanePts = [
+            { x: 54, z: -34 },
+            { x: 56, z: -10 },
+            { x: 54, z: 16 },
+            { x: 48, z: 42 },
+            { x: 38, z: 62 }
+        ];
+        this.shippingLaneWaypoints = lanePts;
+        const laneDashGroup = new THREE.Group();
+        const dashMat = new THREE.MeshBasicMaterial({
+            color: 0xf5f0e1,
+            transparent: true,
+            opacity: 0.28,
+            depthWrite: false,
+            side: THREE.DoubleSide
+        });
+        for (let s = 0; s < lanePts.length - 1; s++) {
+            const p0 = lanePts[s];
+            const p1 = lanePts[s + 1];
+            const dx = p1.x - p0.x;
+            const dz = p1.z - p0.z;
+            const segLen = Math.hypot(dx, dz);
+            const ang = Math.atan2(dz, dx);
+            const dashCount = Math.max(3, Math.floor(segLen / 3.8));
+            for (let d = 0; d < dashCount; d++) {
+                const t = (d + 0.5) / dashCount;
+                const dash = new THREE.Mesh(new THREE.PlaneGeometry(1.65, 0.22), dashMat);
+                dash.rotation.x = -Math.PI / 2;
+                dash.rotation.z = -ang;
+                dash.position.set(p0.x + dx * t, 0.015, p0.z + dz * t);
+                laneDashGroup.add(dash);
+            }
+        }
+        const mergedLane = ProceduralModels.mergeStaticMeshesByMaterial(laneDashGroup, new Set(), { castShadow: false, flatShading: false });
+        this.seaChartGroup.add(mergedLane || laneDashGroup);
+
+        // Animated Outer Scenery Group (hidden automatically in "⚡ Siêu Mượt" mode!)
         this.sceneryGroup = new THREE.Group();
         this.scene.add(this.sceneryGroup);
 
@@ -387,51 +921,13 @@ class World3D {
         this.ambientDolphins = [];
         this.ambientFishSchools = [];
         this.ambientSeagulls = [];
+        this.ambientCargoShips = [];
+        this.ambientWhales = [];
 
-        // 1. 10 Distant Limestone Karst Islands Around the Outer Horizon
-        const karstLocations = [
-            { x: 56, z: -48, scale: 1.45, rot: 0.4 },
-            { x: 66, z: -26, scale: 1.75, rot: 1.7 },
-            { x: 68, z: 2, scale: 1.38, rot: 0.9 },
-            { x: 64, z: 32, scale: 1.65, rot: 2.3 },
-            { x: 52, z: 54, scale: 1.50, rot: 2.8 },
-            { x: -46, z: -44, scale: 1.40, rot: 0.8 },
-            { x: -54, z: -16, scale: 1.60, rot: 2.1 },
-            { x: -52, z: 16, scale: 1.35, rot: 1.2 },
-            { x: -46, z: 48, scale: 1.55, rot: 2.5 },
-            { x: 10, z: 66, scale: 1.42, rot: 0.3 }
-        ];
-        karstLocations.forEach(kl => {
-            const kMesh = ProceduralModels.createDistantKarstOutcrop(kl.scale);
-            kMesh.position.set(kl.x, -0.18, kl.z);
-            kMesh.rotation.y = kl.rot;
-            this.sceneryGroup.add(kMesh);
-        });
-
-        // 2. 4 Decorative Sea Lighthouses with Rotating Light Beams
-        const lighthouseCoords = [
-            { x: 46, z: -40 },
-            { x: 56, z: -6 },
-            { x: 52, z: 26 },
-            { x: 38, z: 52 }
-        ];
-        lighthouseCoords.forEach((lc, idx) => {
-            const lh = ProceduralModels.createSeaLighthouseIsland();
-            lh.position.set(lc.x, -0.16, lc.z);
-            this.sceneryGroup.add(lh);
-            this.ambientLighthouses.push({
-                mesh: lh,
-                beam: lh.userData.beam || lh.userData.beamPivot,
-                speed: 0.85 + idx * 0.20,
-                phase: idx * 1.5
-            });
-        });
-
-        // 3. 3 Offshore Oil & Gas Platforms (Giàn Khoan Dầu Khí Biển Đông)
+        // 1. 2 Offshore Oil & Gas Platforms off Southeast Vietnam (Giàn Khoan Dầu Khí Đông Nam Bộ)
         const oilRigCoords = [
-            { x: 46, z: 38, rot: 0.25 },
-            { x: 58, z: 14, rot: -0.35 },
-            { x: 26, z: 58, rot: 0.65 }
+            { x: 42, z: 24, rot: 0.28 },
+            { x: 48, z: 36, rot: -0.32 }
         ];
         oilRigCoords.forEach((rc, idx) => {
             const rig = ProceduralModels.createOffshoreOilRig();
@@ -446,88 +942,37 @@ class World3D {
             });
         });
 
-        // 4. 12 Ambient Sailing Fishing Sampans Patrolling the Outer Sea
-        const sampanColors = ["#d97706", "#b45309", "#0284c7", "#dc2626", "#15803d", "#7c3aed"];
-        const sampanOrbits = [
-            { cx: 42, cz: -32, rx: 6.5, rz: 4.5, speed: 0.34, phase: 0.0 },
-            { cx: 52, cz: -16, rx: 5.5, rz: 6.5, speed: 0.28, phase: 1.1 },
-            { cx: 54, cz: 6, rx: 6.5, rz: 5.5, speed: 0.32, phase: 2.2 },
-            { cx: 48, cz: 26, rx: 5.5, rz: 4.8, speed: 0.30, phase: 3.3 },
-            { cx: 36, cz: 46, rx: 6.2, rz: 5.2, speed: 0.27, phase: 4.1 },
-            { cx: 14, cz: 56, rx: 7.0, rz: 4.2, speed: 0.31, phase: 5.0 },
-            { cx: -36, cz: -34, rx: 5.2, rz: 5.2, speed: 0.29, phase: 0.7 },
-            { cx: -42, cz: -8, rx: 5.5, rz: 6.2, speed: 0.26, phase: 1.9 },
-            { cx: -40, cz: 22, rx: 5.5, rz: 4.8, speed: 0.33, phase: 3.0 },
-            { cx: -32, cz: 46, rx: 6.0, rz: 4.5, speed: 0.28, phase: 4.4 },
-            { cx: 34, cz: -50, rx: 5.8, rz: 4.2, speed: 0.30, phase: 2.6 },
-            { cx: -14, cz: -52, rx: 6.5, rz: 4.0, speed: 0.32, phase: 1.4 }
-        ];
-        sampanOrbits.forEach((orb, idx) => {
-            const boat = ProceduralModels.createAmbientFishingSampan(sampanColors[idx % sampanColors.length]);
-            boat.position.set(orb.cx, -0.14, orb.cz);
-            this.sceneryGroup.add(boat);
-            this.ambientSampans.push({
-                mesh: boat,
-                ...orb
+        // 2. 2 Tiny Neutral Cargo Ships gliding very slowly along the far SE International Shipping Lane
+        [0.12, 0.62].forEach((startProgress, idx) => {
+            const ship = ProceduralModels.createMiniAmbientCargoShip();
+            this.sceneryGroup.add(ship);
+            this.ambientCargoShips.push({
+                mesh: ship,
+                progress: startProgress,
+                speed: 0.009 + idx * 0.002,
+                dir: idx === 0 ? 1 : -1,
+                phase: idx * 2.7
             });
         });
 
-        // 5. 6 Jumping Dolphin Pods in the Open East Sea
-        const dolphinLocations = [
-            { x: 38, z: -22, rot: 0.4, phase: 0.0 },
-            { x: 46, z: -2, rot: -0.3, phase: 1.2 },
-            { x: 44, z: 18, rot: 0.7, phase: 2.4 },
-            { x: 32, z: 38, rot: 1.1, phase: 3.6 },
-            { x: -32, z: 8, rot: -0.8, phase: 4.8 },
-            { x: 18, z: -44, rot: 0.2, phase: 5.5 }
+        // 3. 2 Slow Low-Poly Whale Silhouettes gliding calmly in outer empty sea (hidden in Smooth mode)
+        const whaleOrbits = [
+            { cx: -46, cz: 26, rx: 6.5, rz: 9.0, speed: 0.09, phase: 0.4 },
+            { cx: 52,  cz: -8, rx: 5.5, rz: 8.5, speed: 0.08, phase: 3.1 }
         ];
-        dolphinLocations.forEach(dl => {
-            const pod = ProceduralModels.createJumpingDolphinPod();
-            pod.position.set(dl.x, -0.16, dl.z);
-            pod.rotation.y = dl.rot;
-            this.sceneryGroup.add(pod);
-            this.ambientDolphins.push({
-                group: pod,
-                d1: pod.userData.d1,
-                d2: pod.userData.d2,
-                dolphins: pod.userData.dolphins,
-                phase: dl.phase
-            });
+        whaleOrbits.forEach(wo => {
+            const whale = ProceduralModels.createSlowWhaleSilhouette();
+            whale.position.set(wo.cx, -0.18, wo.cz);
+            this.sceneryGroup.add(whale);
+            this.ambientWhales.push({ mesh: whale, ...wo });
         });
 
-        // 6. 8 Glowing Underwater Fish Schools
-        const fishSchoolCoords = [
-            { cx: 28, cz: -30, r: 2.4, speed: 0.65, phase: 0.0 },
-            { cx: 36, cz: -10, r: 2.8, speed: 0.55, phase: 1.3 },
-            { cx: 40, cz: 10, r: 2.5, speed: 0.60, phase: 2.1 },
-            { cx: 34, cz: 28, r: 2.6, speed: 0.58, phase: 3.4 },
-            { cx: 20, cz: 44, r: 2.4, speed: 0.62, phase: 4.2 },
-            { cx: -28, cz: -20, r: 2.5, speed: 0.56, phase: 5.1 },
-            { cx: -30, cz: 28, r: 2.5, speed: 0.60, phase: 2.7 },
-            { cx: 24, cz: -40, r: 2.3, speed: 0.64, phase: 0.9 }
-        ];
-        fishSchoolCoords.forEach(fc => {
-            const school = ProceduralModels.createGlowingFishSchool();
-            school.position.set(fc.cx, -0.22, fc.cz);
-            this.sceneryGroup.add(school);
-            this.ambientFishSchools.push({
-                mesh: school,
-                ...fc
-            });
-        });
-
-        // 7. 10 Circling Seagull Flocks High Above the Coast & Islands
+        // 4. 4 Graceful V-Shaped Seagull Flocks Circling Broadly Along the S-Shaped Coastline
         const gullOrbits = [
-            { cx: 14, cz: -32, r: 9, y: 8.5, speed: 0.46, phase: 0.0 },
-            { cx: 22, cz: -14, r: 10, y: 9.2, speed: 0.40, phase: 1.1 },
-            { cx: 28, cz: 4, r: 11, y: 8.8, speed: 0.42, phase: 2.3 },
-            { cx: 24, cz: 24, r: 9.5, y: 8.4, speed: 0.44, phase: 3.5 },
-            { cx: 10, cz: 40, r: 10, y: 8.6, speed: 0.39, phase: 4.7 },
-            { cx: -16, cz: -24, r: 8.5, y: 9.4, speed: 0.43, phase: 5.4 },
-            { cx: -12, cz: 14, r: 9.0, y: 9.0, speed: 0.41, phase: 1.8 },
-            { cx: 42, cz: -8, r: 8.5, y: 7.8, speed: 0.48, phase: 2.9 },
-            { cx: 38, cz: 24, r: 8.5, y: 7.6, speed: 0.45, phase: 4.0 },
-            { cx: -18, cz: 36, r: 9.0, y: 8.8, speed: 0.42, phase: 0.6 }
+            { cx: 16, cz: -34, rx: 14, rz: 9,  y: 9.2, speed: 0.28, phase: 0.0 },
+            { cx: 24, cz: -4,  rx: 15, rz: 10, y: 9.8, speed: 0.24, phase: 1.6 },
+            { cx: 20, cz: 26,  rx: 14, rz: 9,  y: 9.0, speed: 0.26, phase: 3.1 },
+            { cx: 44, cz: 10,  rx: 11, rz: 14, y: 8.6, speed: 0.25, phase: 4.7 }
         ];
         gullOrbits.forEach(go => {
             const flock = ProceduralModels.createSeagullFlock();
@@ -623,32 +1068,32 @@ class World3D {
         // Special POIs placed in the Coastal & Sea Waters along the 29-row S-Curve
         // Plus 10 Offshore Resource Nodes ("Tăng thêm các ô khai thác tài nguyên ngoài biển xa đất liền")
         const specialPlacements = {
-            // 1. TRUNG DU & MIỀN NÚI BẮC BỘ (Region 0)
+            // 1. TRUNG DU & MIỀN NÚI BẮC BỘ (Region 0) — Miền Bắc giàu Sắt, ít Lúa, khan hiếm Gỗ
             "-14,3":  { terrain: "coast", monumentId: "mon_sapa", regionId: 0, navigable: true },
-            "-13,4":  { terrain: "coast", resourceType: "iron", regionId: 0, navigable: true },
+            "-13,4":  { terrain: "coast", isPort: true, portName: "Thương Cảng Cái Lân (Quảng Ninh)", regionId: 0, navigable: true },
             "-13,8":  { terrain: "sea", resourceType: "iron", regionId: 0, navigable: true, isOffshore: true },
-            "-12,4":  { terrain: "coast", isPort: true, portName: "Thương Cảng Cái Lân (Quảng Ninh)", regionId: 0, navigable: true },
-            "-12,6":  { terrain: "sea", resourceType: "wood", regionId: 0, navigable: true },
+            "-12,4":  { terrain: "coast", resourceType: "iron", regionId: 0, navigable: true },
+            "-12,6":  { terrain: "sea", resourceType: "iron", regionId: 0, navigable: true },
             "-11,3":  { terrain: "island", monumentId: "mon_halong", regionId: 0, navigable: true },
             "-11,5":  { terrain: "reef", isReef: true, regionId: 0, navigable: true },
             "-11,9":  { terrain: "sea", resourceType: "food", regionId: 0, navigable: true, isOffshore: true },
 
-            // 2. ĐỒNG BẰNG SÔNG HỒNG (Region 1)
-            "-10,3":  { terrain: "coast", isPort: true, portName: "Thương Cảng Hải Phòng", regionId: 1, navigable: true },
-            "-10,5":  { terrain: "sea", resourceType: "food", regionId: 1, navigable: true },
+            // 2. ĐỒNG BẰNG SÔNG HỒNG (Region 1) — Cảng Hải Phòng đẩy xuống mép Nam Vùng 1 (cách Cái Lân 6 ô biển)
+            "-10,3":  { terrain: "coast", resourceType: "food", regionId: 1, navigable: true },
+            "-10,5":  { terrain: "sea", resourceType: "wood", regionId: 1, navigable: true },
             "-9,2":   { terrain: "coast", monumentId: "mon_vanmieu", regionId: 1, navigable: true },
             "-9,4":   { terrain: "reef", isReef: true, regionId: 1, navigable: true },
-            "-9,8":   { terrain: "sea", resourceType: "wood", regionId: 1, navigable: true, isOffshore: true },
-            "-8,1":   { terrain: "coast", resourceType: "food", regionId: 1, navigable: true },
+            "-9,8":   { terrain: "sea", resourceType: "iron", regionId: 1, navigable: true, isOffshore: true },
+            "-8,1":   { terrain: "coast", isPort: true, portName: "Thương Cảng Hải Phòng", regionId: 1, navigable: true },
             "-8,6":   { terrain: "sea", resourceType: "iron", regionId: 1, navigable: true, isOffshore: true },
 
-            // 3. BẮC TRUNG BỘ & DUYÊN HẢI MIỀN TRUNG (Region 2)
+            // 3. BẮC TRUNG BỘ & DUYÊN HẢI MIỀN TRUNG (Region 2) — Miền Trung & Tây Nguyên giàu Gỗ, ít Sắt, khan hiếm Lúa
             "-7,0":   { terrain: "coast", resourceType: "wood", regionId: 2, navigable: true },
-            "-6,-1":  { terrain: "coast", resourceType: "iron", regionId: 2, navigable: true },
+            "-6,-1":  { terrain: "coast", resourceType: "wood", regionId: 2, navigable: true },
             "-6,2":   { terrain: "reef", isReef: true, regionId: 2, navigable: true },
-            "-6,7":   { terrain: "sea", resourceType: "food", regionId: 2, navigable: true, isOffshore: true },
+            "-6,7":   { terrain: "sea", resourceType: "iron", regionId: 2, navigable: true, isOffshore: true },
             "-4,0":   { terrain: "coast", monumentId: "mon_phongnha", regionId: 2, navigable: true },
-            "-4,5":   { terrain: "sea", resourceType: "iron", regionId: 2, navigable: true, isOffshore: true },
+            "-4,5":   { terrain: "sea", resourceType: "wood", regionId: 2, navigable: true, isOffshore: true },
             "-3,1":   { terrain: "coast", monumentId: "mon_hue", regionId: 2, navigable: true },
             "-3,3":   { terrain: "reef", isReef: true, regionId: 2, navigable: true },
             "-2,3":   { terrain: "coast", isPort: true, portName: "Thương Cảng Tiên Sa (Đà Nẵng)", regionId: 2, navigable: true },
@@ -664,14 +1109,14 @@ class World3D {
             "2,7":    { terrain: "reef", isReef: true, regionId: 3, navigable: true },
             "3,4":    { terrain: "coast", monumentId: "mon_taynguyen", regionId: 3, navigable: true },
             "3,8":    { terrain: "sea", resourceType: "iron", regionId: 3, navigable: true, isOffshore: true },
-            "4,3":    { terrain: "coast", resourceType: "iron", regionId: 3, navigable: true },
-            "4,5":    { terrain: "sea", resourceType: "food", regionId: 3, navigable: true },
+            "4,3":    { terrain: "coast", resourceType: "wood", regionId: 3, navigable: true },
+            "4,5":    { terrain: "sea", resourceType: "iron", regionId: 3, navigable: true },
 
-            // 5. ĐÔNG NAM BỘ (Region 4)
+            // 5. ĐÔNG NAM BỘ (Region 4) — Miền Nam giàu Lúa, ít Gỗ, khan hiếm Sắt
             "5,2":    { terrain: "coast", resourceType: "wood", regionId: 4, navigable: true },
             "5,4":    { terrain: "reef", isReef: true, regionId: 4, navigable: true },
             "6,1":    { terrain: "coast", isPort: true, portName: "Thương Cảng Quốc Tế Cái Mép – Sài Gòn", regionId: 4, navigable: true },
-            "6,8":    { terrain: "sea", resourceType: "iron", regionId: 4, navigable: true, isOffshore: true },
+            "6,8":    { terrain: "sea", resourceType: "food", regionId: 4, navigable: true, isOffshore: true },
             "7,1":    { terrain: "coast", monumentId: "mon_bennharong", regionId: 4, navigable: true },
             "7,3":    { terrain: "sea", resourceType: "iron", regionId: 4, navigable: true },
             "8,1":    { terrain: "reef", isReef: true, regionId: 4, navigable: true },
@@ -767,6 +1212,18 @@ class World3D {
             }
         }
 
+        this._sandInstances = [];
+        this._landBaseInstances = [];
+        this._landCapInstances = [];
+        this._landRimInstances = [];
+        this._reefSpireInstances = [];
+        this._reefCoralInstances = [];
+        this._poiHexCoords = layoutSpec
+            .filter(s => s.monumentId || s.isPort || s.resourceType)
+            .map(s => ({ q: s.q, r: s.r }));
+        this.staticDioramaGroup = new THREE.Group();
+        this.boardGroup.add(this.staticDioramaGroup);
+
         layoutSpec.forEach((spec, idx) => {
             const tile = this.createHexTile(spec, idx, monumentAssignments);
             this.hexTiles.push(tile);
@@ -774,25 +1231,254 @@ class World3D {
             this.boardGroup.add(tile.group);
         });
 
+        this.finalizeBoardInstancingAndMerging();
+        this.buildRegionBoundaries3D();
         this.buildRegionBanners();
         this.applyMinimalistMode();
     }
 
+    // ------------------------------------------------------------------------
+    // 3D REGION BOUNDARY STRIPS FOR ALL 6 ECONOMIC REGIONS (MERGED BY COLOR!)
+    // Real 3D extruded strips along every region's outer & inter-region borders
+    // ------------------------------------------------------------------------
+    buildRegionBoundaries3D() {
+        const regionColors = [
+            0x22c55e, // 0: Trung du & MN Bắc Bộ (Xanh lá đậm rực)
+            0xfacc15, // 1: Đồng bằng Sông Hồng (Vàng rực)
+            0x38bdf8, // 2: Duyên hải Miền Trung (Xanh lam sáng)
+            0xf97316, // 3: Tây Nguyên (Cam đất đỏ)
+            0xf43f5e, // 4: Đông Nam Bộ (Đỏ hồng năng động)
+            0x84cc16  // 5: Đồng bằng Sông Cửu Long (Xanh cốm tươi)
+        ];
+
+        // Axial neighbor directions for pointy-top hexes:
+        // E(1,0), SE(0,1), SW(-1,1), W(-1,0), NW(0,-1), NE(1,-1)
+        const edgeDirs = [
+            { dq: 1,  dr: 0,  a0: -Math.PI / 6,     a1: Math.PI / 6 },
+            { dq: 0,  dr: 1,  a0: Math.PI / 6,      a1: Math.PI / 2 },
+            { dq: -1, dr: 1,  a0: Math.PI / 2,      a1: 5 * Math.PI / 6 },
+            { dq: -1, dr: 0,  a0: 5 * Math.PI / 6,  a1: 7 * Math.PI / 6 },
+            { dq: 0,  dr: -1, a0: 7 * Math.PI / 6,  a1: 3 * Math.PI / 2 },
+            { dq: 1,  dr: -1, a0: 3 * Math.PI / 2,  a1: 11 * Math.PI / 6 }
+        ];
+
+        const boundaryGroup = new THREE.Group();
+        const R = this.hexRadius * 1.005;
+        const mats = regionColors.map(hex => new THREE.MeshLambertMaterial({
+            color: hex,
+            emissive: hex,
+            emissiveIntensity: 0.48,
+            flatShading: true
+        }));
+
+        this.hexTiles.forEach(tile => {
+            if (tile.navigable || tile.terrain === "archipelago") return;
+            const regId = tile.regionId;
+            const bMat = mats[regId] || mats[0];
+
+            for (let d = 0; d < 6; d++) {
+                const ed = edgeDirs[d];
+                const nb = this.hexMap.get(`${tile.q + ed.dq},${tile.r + ed.dr}`);
+                const isSameLandRegion = Boolean(nb && !nb.navigable && nb.terrain !== "archipelago" && nb.regionId === regId);
+                if (isSameLandRegion) continue;
+
+                const x0 = tile.x + Math.cos(ed.a0) * R;
+                const z0 = tile.z + Math.sin(ed.a0) * R;
+                const x1 = tile.x + Math.cos(ed.a1) * R;
+                const z1 = tile.z + Math.sin(ed.a1) * R;
+
+                const mx = (x0 + x1) * 0.5;
+                const mz = (z0 + z1) * 0.5;
+                const segLen = Math.hypot(x1 - x0, z1 - z0) + 0.14;
+                const angle = Math.atan2(z1 - z0, x1 - x0);
+
+                const strip = new THREE.Mesh(new THREE.BoxGeometry(segLen, 0.14, 0.22), bMat);
+                strip.position.set(mx, tile.height + 0.03, mz);
+                strip.rotation.y = -angle;
+                boundaryGroup.add(strip);
+            }
+        });
+
+        const mergedBorders = ProceduralModels.mergeStaticMeshesByMaterial(boundaryGroup, new Set(), {
+            castShadow: false,
+            flatShading: true
+        });
+        this.boardGroup.add(mergedBorders || boundaryGroup);
+    }
+
+    finalizeBoardInstancingAndMerging() {
+        const useInstanced = typeof THREE.InstancedMesh === "function" && typeof THREE.Object3D === "function";
+        const dummy = useInstanced ? new THREE.Object3D() : null;
+
+        // 1. InstancedMesh for Coastal Sand Skirts (1 Draw Call)
+        if (useInstanced && this._sandInstances.length > 0) {
+            const sandGeo = new THREE.CylinderGeometry(this.hexRadius * 1.01, this.hexRadius * 1.05, 0.15, 6);
+            const sandMat = new THREE.MeshLambertMaterial({ color: 0xd6c79c });
+            const sandIM = new THREE.InstancedMesh(sandGeo, sandMat, this._sandInstances.length);
+            sandIM.receiveShadow = true;
+            sandIM.castShadow = false;
+            this._sandInstances.forEach((it, i) => {
+                dummy.position.set(it.x, -0.02, it.z);
+                dummy.scale.set(1, 1, 1);
+                dummy.rotation.set(0, 0, 0);
+                dummy.updateMatrix();
+                sandIM.setMatrixAt(i, dummy.matrix);
+            });
+            sandIM.instanceMatrix.needsUpdate = true;
+            this.boardGroup.add(sandIM);
+        }
+
+        // 2. InstancedMesh for Static Land Hex Columns (1 Draw Call)
+        if (useInstanced && this._landBaseInstances.length > 0) {
+            const unitHexGeo = new THREE.CylinderGeometry(this.hexRadius * 0.96, this.hexRadius * 1.0, 1.0, 6);
+            const landMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+            const landIM = new THREE.InstancedMesh(unitHexGeo, landMat, this._landBaseInstances.length);
+            landIM.receiveShadow = true;
+            landIM.castShadow = false;
+            this._landBaseInstances.forEach((it, i) => {
+                dummy.position.set(it.x, it.height / 2 - 0.1, it.z);
+                dummy.scale.set(1, it.height, 1);
+                dummy.rotation.set(0, 0, 0);
+                dummy.updateMatrix();
+                landIM.setMatrixAt(i, dummy.matrix);
+                if (landIM.setColorAt) landIM.setColorAt(i, it.color);
+            });
+            landIM.instanceMatrix.needsUpdate = true;
+            if (landIM.instanceColor) landIM.instanceColor.needsUpdate = true;
+            this.boardGroup.add(landIM);
+        }
+
+        // 3. InstancedMesh for Static Land Plateau Caps (1 Draw Call)
+        if (useInstanced && this._landCapInstances.length > 0) {
+            const capGeo = new THREE.CylinderGeometry(this.hexRadius * 0.84, this.hexRadius * 0.94, 0.09, 6);
+            const capMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+            const capIM = new THREE.InstancedMesh(capGeo, capMat, this._landCapInstances.length);
+            capIM.receiveShadow = true;
+            capIM.castShadow = false;
+            this._landCapInstances.forEach((it, i) => {
+                dummy.position.set(it.x, it.height - 0.06, it.z);
+                dummy.scale.set(1, 1, 1);
+                dummy.rotation.set(0, 0, 0);
+                dummy.updateMatrix();
+                capIM.setMatrixAt(i, dummy.matrix);
+                if (capIM.setColorAt) capIM.setColorAt(i, it.color);
+            });
+            capIM.instanceMatrix.needsUpdate = true;
+            if (capIM.instanceColor) capIM.instanceColor.needsUpdate = true;
+            this.boardGroup.add(capIM);
+        }
+
+        // 4. InstancedMesh for Static Land Hex Rims (1 Draw Call)
+        if (useInstanced && this._landRimInstances.length > 0) {
+            const rimGeo = new THREE.RingGeometry(this.hexRadius * 0.88, this.hexRadius * 0.96, 6);
+            rimGeo.rotateX(-Math.PI / 2);
+            rimGeo.rotateZ(Math.PI / 6);
+            const rimMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.42, side: THREE.DoubleSide });
+            const rimIM = new THREE.InstancedMesh(rimGeo, rimMat, this._landRimInstances.length);
+            this._landRimInstances.forEach((it, i) => {
+                dummy.position.set(it.x, it.height - 0.085, it.z);
+                dummy.scale.set(1, 1, 1);
+                dummy.rotation.set(0, 0, 0);
+                dummy.updateMatrix();
+                rimIM.setMatrixAt(i, dummy.matrix);
+                if (rimIM.setColorAt) rimIM.setColorAt(i, it.color);
+            });
+            rimIM.instanceMatrix.needsUpdate = true;
+            if (rimIM.instanceColor) rimIM.instanceColor.needsUpdate = true;
+            this.boardGroup.add(rimIM);
+        }
+
+        // 5. InstancedMesh for Sharp Dark-Gray Reef Spires & Thin White Foam Rings (2 Draw Calls for all reefs!)
+        if (useInstanced && this._reefSpireInstances.length > 0) {
+            const spireGeo = new THREE.ConeGeometry(0.26, 1.0, 5);
+            const reefMat = new THREE.MeshLambertMaterial({ color: 0x1e293b, flatShading: true });
+            const spireIM = new THREE.InstancedMesh(spireGeo, reefMat, this._reefSpireInstances.length);
+            spireIM.castShadow = false;
+            this._reefSpireInstances.forEach((it, i) => {
+                dummy.position.set(it.x, it.y, it.z);
+                dummy.scale.set(it.sx || 1, it.h, it.sz || 1);
+                dummy.rotation.set(0, it.rot || 0, 0);
+                dummy.updateMatrix();
+                spireIM.setMatrixAt(i, dummy.matrix);
+            });
+            spireIM.instanceMatrix.needsUpdate = true;
+            this.boardGroup.add(spireIM);
+        }
+        if (useInstanced && this._reefCoralInstances.length > 0) {
+            const foamGeo = new THREE.RingGeometry(0.72, 0.92, 18);
+            foamGeo.rotateX(-Math.PI / 2);
+            const foamMat = new THREE.MeshBasicMaterial({ color: 0xf8fafc, transparent: true, opacity: 0.78, side: THREE.DoubleSide });
+            const foamIM = new THREE.InstancedMesh(foamGeo, foamMat, this._reefCoralInstances.length);
+            this._reefCoralInstances.forEach((it, i) => {
+                dummy.position.set(it.x, it.y, it.z);
+                dummy.scale.set(1, 1, 1);
+                dummy.rotation.set(0, 0, 0);
+                dummy.updateMatrix();
+                foamIM.setMatrixAt(i, dummy.matrix);
+            });
+            foamIM.instanceMatrix.needsUpdate = true;
+            this.boardGroup.add(foamIM);
+        }
+
+        // 6. Merge static mainland diorama meshes by material (keeps animatedLandProps separate!)
+        if (ProceduralModels.mergeStaticMeshesByMaterial && this.staticDioramaGroup) {
+            const animSet = new Set();
+            this.animatedLandProps.forEach(p => {
+                if (p && p.mesh) animSet.add(p.mesh);
+            });
+            const mergedDioramas = ProceduralModels.mergeStaticMeshesByMaterial(this.staticDioramaGroup, animSet);
+            if (mergedDioramas) {
+                this.boardGroup.add(mergedDioramas);
+            }
+        }
+
+        // 7. Auto-orient all 6 Trade Ports so their piers (+X) extend directly toward the nearest open sea hex!
+        const axialDirs = [[1, 0], [1, -1], [0, -1], [-1, 0], [-1, 1], [0, 1]];
+        this.hexTiles.forEach(tile => {
+            if (!tile.isPort || !tile.propModel) return;
+            let sumX = 0, sumZ = 0, count = 0;
+            axialDirs.forEach(([dq, dr]) => {
+                const nb = this.hexMap.get(`${tile.q + dq},${tile.r + dr}`);
+                if (nb && nb.navigable && nb.terrain === "sea") {
+                    sumX += (nb.x - tile.x);
+                    sumZ += (nb.z - tile.z);
+                    count++;
+                }
+            });
+            if (count === 0) {
+                axialDirs.forEach(([dq, dr]) => {
+                    const nb = this.hexMap.get(`${tile.q + dq},${tile.r + dr}`);
+                    if (nb && nb.navigable) {
+                        sumX += (nb.x - tile.x);
+                        sumZ += (nb.z - tile.z);
+                        count++;
+                    }
+                });
+            }
+            if (count > 0 && Math.hypot(sumX, sumZ) > 0.01) {
+                tile.propModel.rotation.y = -Math.atan2(sumZ, sumX);
+            }
+        });
+    }
+
     buildRegionBanners() {
+        this.regionBannerSprites = [];
+        // Positioned in clear open areas of each region (inland/west side) so they never overlap coastal Monuments or Ports!
         const regionBanners = [
-            { r: -13, col: -2, line1: "1. TRUNG DU &", line2: "MIỀN NÚI BẮC BỘ", color: "#2d7a36" },
-            { r: -10, col: -2, line1: "2. ĐỒNG BẰNG", line2: "SÔNG HỒNG", color: "#f5b81c" },
-            { r: -5,  col: -3, line1: "3. DUYÊN HẢI", line2: "MIỀN TRUNG", color: "#5a7f91" },
-            { r: 2,   col: 1,  line1: "4. TÂY NGUYÊN", line2: "ĐẠI NGÀN BAZAN", color: "#994920" },
-            { r: 6,   col: -2, line1: "5. ĐÔNG NAM BỘ", line2: "ĐẦU TÀU KINH TẾ", color: "#8a2430" },
-            { r: 11,  col: -6, line1: "6. ĐỒNG BẰNG", line2: "SÔNG CỬU LONG", color: "#659b38" }
+            { r: -13, col: -3.2, line1: "1. TRUNG DU &", line2: "MIỀN NÚI BẮC BỘ", color: "#22c55e" },
+            { r: -10, col: -3.4, line1: "2. ĐỒNG BẰNG", line2: "SÔNG HỒNG", color: "#facc15" },
+            { r: -6,  col: -4.4, line1: "3. DUYÊN HẢI", line2: "MIỀN TRUNG", color: "#38bdf8" },
+            { r: 1,   col: -0.2, line1: "4. TÂY NGUYÊN", line2: "ĐẠI NGÀN BAZAN", color: "#f97316" },
+            { r: 6,   col: -3.4, line1: "5. ĐÔNG NAM BỘ", line2: "ĐẦU TÀU KINH TẾ", color: "#f43f5e" },
+            { r: 11,  col: -7.2, line1: "6. ĐỒNG BẰNG", line2: "SÔNG CỬU LONG", color: "#84cc16" }
         ];
         regionBanners.forEach(rb => {
             const q = -Math.floor(rb.r / 2) + rb.col;
             const { x, z } = this.axialToWorld(q, rb.r);
-            const sprite = ProceduralModels.createRegionBannerSprite(rb.line1, rb.line2, rb.color, 2.75, 0.68);
-            sprite.position.set(x, 2.45, z);
+            const sprite = ProceduralModels.createRegionBannerSprite(rb.line1, rb.line2, rb.color, 5.2, 1.30);
+            sprite.position.set(x, 3.15, z);
             this.boardGroup.add(sprite);
+            this.regionBannerSprites.push(sprite);
         });
 
         const compass = ProceduralModels.createTabletopCompassAndTitlePlaque();
@@ -813,159 +1499,141 @@ class World3D {
         let topColor = new THREE.Color(region.color);
         let capColor = topColor.clone();
 
+        const pastelBase = new THREE.Color(0xc8c3b8);
         if (spec.terrain === "sea") {
             height = 0.14;
             const seaDist = Math.max(1, (spec.col || 0) - (spec.maxLandCol !== undefined ? spec.maxLandCol : 0));
             if (spec.isSpawnRim) {
-                topColor = new THREE.Color(0x0284c7);
+                topColor = new THREE.Color(0x135b82);
             } else if (seaDist <= 2) {
-                topColor = new THREE.Color(0x0369a1);
+                topColor = new THREE.Color(0x11557a);
             } else if (seaDist <= 4) {
-                topColor = new THREE.Color(0x075985);
+                topColor = new THREE.Color(0x0f4e70);
             } else {
-                topColor = new THREE.Color(0x0c4a6e);
+                topColor = new THREE.Color(0x0c4766);
             }
         } else if (spec.terrain === "coast") {
             height = 0.19;
-            topColor = new THREE.Color(0x0ea5e9).lerp(new THREE.Color(region.color), 0.22);
+            topColor = new THREE.Color(0x155d80).lerp(new THREE.Color(region.color), 0.10);
         } else if (spec.terrain === "river_channel") {
             height = 0.18;
-            topColor = new THREE.Color(0x06b6d4);
+            topColor = new THREE.Color(0x136685);
         } else if (spec.terrain === "reef") {
             height = 0.21;
-            topColor = new THREE.Color(0x1e293b);
+            topColor = new THREE.Color(0x114f6e);
         } else if (spec.terrain === "archipelago") {
             height = 0.36;
-            topColor = new THREE.Color(0x0d9488);
+            topColor = new THREE.Color(0x1e6b6b);
         } else if (spec.terrain === "mountain") {
             height = 0.62 + jitter * 0.22;
-            topColor.offsetHSL(0, (jitter - 0.5) * 0.06, (jitter - 0.5) * 0.05);
-            capColor = topColor.clone().offsetHSL(0, 0.05, 0.06);
+            topColor.lerp(pastelBase, 0.44).offsetHSL(0, -0.30 + (jitter - 0.5) * 0.03, -0.02 + (jitter - 0.5) * 0.02);
+            capColor = topColor.clone().offsetHSL(0, 0.01, 0.03);
         } else if (spec.terrain === "highland") {
             height = 0.52 + jitter * 0.16;
-            topColor.offsetHSL(0, (jitter - 0.5) * 0.05, (jitter - 0.5) * 0.04);
-            capColor = topColor.clone().offsetHSL(0, 0.04, 0.05);
+            topColor.lerp(pastelBase, 0.44).offsetHSL(0, -0.30 + (jitter - 0.5) * 0.03, -0.02 + (jitter - 0.5) * 0.02);
+            capColor = topColor.clone().offsetHSL(0, 0.01, 0.02);
         } else if (spec.terrain === "southeast_land") {
             height = 0.42 + jitter * 0.10;
-            capColor = topColor.clone().offsetHSL(0, 0.03, 0.05);
+            topColor.lerp(pastelBase, 0.46).offsetHSL(0, -0.30, -0.01);
+            capColor = topColor.clone().offsetHSL(0, 0.01, 0.02);
         } else if (spec.terrain === "coast_land") {
             height = 0.38 + jitter * 0.09;
-            capColor = topColor.clone().offsetHSL(0, 0.04, 0.06);
+            topColor.lerp(pastelBase, 0.46).offsetHSL(0, -0.30, -0.01);
+            capColor = topColor.clone().offsetHSL(0, 0.01, 0.03);
         } else if (spec.terrain === "delta_land") {
             height = 0.34 + jitter * 0.07;
-            capColor = topColor.clone().offsetHSL(0, 0.04, 0.05);
+            topColor.lerp(pastelBase, 0.46).offsetHSL(0, -0.30, -0.01);
+            capColor = topColor.clone().offsetHSL(0, 0.01, 0.02);
         } else if (spec.terrain === "island") {
             height = 0.32;
-            capColor = topColor.clone().offsetHSL(0, 0.04, 0.05);
+            topColor.lerp(pastelBase, 0.36).offsetHSL(0, -0.22, -0.01);
+            capColor = topColor.clone().offsetHSL(0, 0.01, 0.03);
         } else {
             height = 0.26;
         }
 
         const isWaterHex = (spec.terrain === "sea" || spec.terrain === "coast" || spec.terrain === "river_channel");
+        const isStaticLandHex = !spec.navigable;
         const defaultBaseOpacity = spec.terrain === "sea" ? 0.50 : (isWaterHex ? 0.70 : 1.0);
+        const useInstanced = typeof THREE.InstancedMesh === "function";
 
         // Stratified Layer 1: Golden Sandy Beach / Coastal Shelf Skirt for Mainland & Islands
         if (!isWaterHex && spec.terrain !== "reef") {
-            const sandGeo = new THREE.CylinderGeometry(this.hexRadius * 1.01, this.hexRadius * 1.05, 0.15, 6);
-            const sandMat = new THREE.MeshStandardMaterial({
-                color: 0xfde68a,
-                roughness: 0.85,
-                metalness: 0.05
-            });
-            const sandSkirt = new THREE.Mesh(sandGeo, sandMat);
-            sandSkirt.position.y = -0.02;
-            sandSkirt.receiveShadow = true;
-            group.add(sandSkirt);
+            if (useInstanced) {
+                this._sandInstances.push({ x, z });
+            } else {
+                const sandGeo = new THREE.CylinderGeometry(this.hexRadius * 1.01, this.hexRadius * 1.05, 0.15, 6);
+                const sandMat = new THREE.MeshLambertMaterial({ color: 0xfde68a });
+                const sandSkirt = new THREE.Mesh(sandGeo, sandMat);
+                sandSkirt.position.y = -0.02;
+                sandSkirt.receiveShadow = true;
+                group.add(sandSkirt);
+            }
         }
 
-        // Stratified Layer 2: Main Hex Column
-        const hexGeo = new THREE.CylinderGeometry(this.hexRadius * 0.96, this.hexRadius * 1.0, height, 6);
-        const hexMat = new THREE.MeshStandardMaterial({
-            color: topColor,
-            roughness: isWaterHex ? 0.22 : 0.56,
-            metalness: isWaterHex ? 0.32 : 0.10,
-            transparent: true,
-            opacity: defaultBaseOpacity
-        });
+        // Stratified Layer 2: Main Hex Column (Static land hexes batched via InstancedMesh!)
+        let baseMesh = null;
+        if (isStaticLandHex && useInstanced) {
+            this._landBaseInstances.push({ x, z, height, color: topColor });
+        } else {
+            const hexGeo = new THREE.CylinderGeometry(this.hexRadius * 0.96, this.hexRadius * 1.0, height, 6);
+            const hexMat = new THREE.MeshLambertMaterial({
+                color: topColor,
+                transparent: true,
+                opacity: defaultBaseOpacity
+            });
+            baseMesh = new THREE.Mesh(hexGeo, hexMat);
+            baseMesh.position.y = height / 2 - 0.1;
+            baseMesh.receiveShadow = true;
+            baseMesh.castShadow = false;
+            group.add(baseMesh);
+            // CPU Optimization: Raycast ONLY interactive navigable hexes!
+            if (spec.navigable) {
+                this.pickableMeshes.push(baseMesh);
+            }
+        }
 
-        const baseMesh = new THREE.Mesh(hexGeo, hexMat);
-        baseMesh.position.y = height / 2 - 0.1;
-        baseMesh.receiveShadow = true;
-        baseMesh.castShadow = !isWaterHex;
-        group.add(baseMesh);
-        this.pickableMeshes.push(baseMesh);
-
-        // Stratified Layer 3: Beveled Top Plateau Cap for Mainland Hexes
+        // Stratified Layer 3: Beveled Top Plateau Cap for Mainland Hexes (InstancedMesh!)
         if (!spec.navigable && spec.terrain !== "archipelago") {
-            const capGeo = new THREE.CylinderGeometry(this.hexRadius * 0.84, this.hexRadius * 0.94, 0.09, 6);
-            const capMat = new THREE.MeshStandardMaterial({
-                color: capColor,
-                roughness: 0.52,
-                metalness: 0.08
-            });
-            const capMesh = new THREE.Mesh(capGeo, capMat);
-            capMesh.position.y = height - 0.06;
-            capMesh.receiveShadow = true;
-            capMesh.castShadow = true;
-            group.add(capMesh);
+            if (useInstanced) {
+                this._landCapInstances.push({ x, z, height, color: capColor });
+            } else {
+                const capGeo = new THREE.CylinderGeometry(this.hexRadius * 0.84, this.hexRadius * 0.94, 0.09, 6);
+                const capMat = new THREE.MeshLambertMaterial({ color: capColor });
+                const capMesh = new THREE.Mesh(capGeo, capMat);
+                capMesh.position.y = height - 0.06;
+                capMesh.receiveShadow = true;
+                capMesh.castShadow = false;
+                group.add(capMesh);
+            }
         }
 
-        const defaultRimOpacity = isWaterHex ? 0.06 : 0.42;
-        const rimGeo = new THREE.RingGeometry(this.hexRadius * 0.88, this.hexRadius * 0.96, 6);
-        rimGeo.rotateX(-Math.PI / 2);
-        rimGeo.rotateZ(Math.PI / 6);
-        const rimColor = spec.terrain === "reef"
-            ? new THREE.Color(0xef4444)
-            : new THREE.Color(region.color);
-        const rimMat = new THREE.MeshBasicMaterial({
-            color: rimColor,
-            transparent: true,
-            opacity: defaultRimOpacity,
-            side: THREE.DoubleSide
-        });
-        const rimMesh = new THREE.Mesh(rimGeo, rimMat);
-        rimMesh.position.y = height - 0.085;
-        group.add(rimMesh);
+        // Hex border lines removed for a clean, seamless map ("Xóa các đường xung quanh tất cả các ô đang có hiện tại")
+        const defaultRimOpacity = 0.0;
+        const rimMesh = null;
 
-        const hlGeo = new THREE.RingGeometry(this.hexRadius * 0.82, this.hexRadius * 0.98, 6);
-        hlGeo.rotateX(-Math.PI / 2);
-        hlGeo.rotateZ(Math.PI / 6);
-        const hlMat = new THREE.MeshBasicMaterial({
-            color: 0x38bdf8,
-            transparent: true,
-            opacity: 0.0,
-            side: THREE.DoubleSide
-        });
-        const highlightRing = new THREE.Mesh(hlGeo, hlMat);
-        highlightRing.position.y = height - 0.05;
-        group.add(highlightRing);
+        let highlightRing = null;
+        if (spec.navigable) {
+            const hlGeo = new THREE.RingGeometry(this.hexRadius * 0.82, this.hexRadius * 0.98, 6);
+            hlGeo.rotateX(-Math.PI / 2);
+            hlGeo.rotateZ(Math.PI / 6);
+            const hlMat = new THREE.MeshBasicMaterial({
+                color: 0x38bdf8,
+                transparent: true,
+                opacity: 0.0,
+                side: THREE.DoubleSide
+            });
+            highlightRing = new THREE.Mesh(hlGeo, hlMat);
+            highlightRing.position.y = height - 0.05;
+            group.add(highlightRing);
+        }
 
         const surfaceY = height - 0.1;
 
         let reefPropGroup = null;
         if (spec.terrain === "reef" || spec.isReef) {
-            reefPropGroup = new THREE.Group();
+            reefPropGroup = ProceduralModels.createReefShoalModel(tileSeed);
             reefPropGroup.position.y = surfaceY;
-            const reefMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.82, metalness: 0.18 });
-            const tipMat = new THREE.MeshStandardMaterial({ color: 0xf43f5e, emissive: 0x9f1239, emissiveIntensity: 0.35, roughness: 0.5 });
-            [[-0.55, -0.35, 0.56], [-0.22, -0.58, 0.44], [-0.66, 0.05, 0.38], [0.05, -0.55, 0.40]].forEach(([rx, rz, h]) => {
-                const spire = new THREE.Mesh(new THREE.ConeGeometry(0.24, h, 5), reefMat);
-                spire.position.set(rx, h / 2, rz);
-                spire.castShadow = true;
-                reefPropGroup.add(spire);
-
-                const coral = new THREE.Mesh(new THREE.DodecahedronGeometry(0.11, 0), tipMat);
-                coral.position.set(rx, h * 0.85, rz);
-                reefPropGroup.add(coral);
-            });
-            const warnRingGeo = new THREE.RingGeometry(0.55, 0.82, 18);
-            warnRingGeo.rotateX(-Math.PI / 2);
-            const warnRing = new THREE.Mesh(
-                warnRingGeo,
-                new THREE.MeshBasicMaterial({ color: 0xef4444, transparent: true, opacity: 0.50, side: THREE.DoubleSide })
-            );
-            warnRing.position.set(-0.35, 0.03, -0.35);
-            reefPropGroup.add(warnRing);
             group.add(reefPropGroup);
         } else if (!spec.navigable) {
             if (spec.terrain === "archipelago" && spec.archipelagoName) {
@@ -976,8 +1644,21 @@ class World3D {
                 archModel.position.y = surfaceY;
                 group.add(archModel);
             } else {
-                const landDiorama = ProceduralModels.createLandHexDiorama(spec, surfaceY + 0.04, this.animatedLandProps);
-                group.add(landDiorama);
+                // Stage Clearing: automatically omit trees/decorations adjacent (dist <= 1) to any Monument, Port, or Resource!
+                let minPoiDist = 99;
+                if (this._poiHexCoords) {
+                    for (let p = 0; p < this._poiHexCoords.length; p++) {
+                        const d = World3D.hexDistance(spec, this._poiHexCoords[p]);
+                        if (d < minPoiDist) minPoiDist = d;
+                    }
+                }
+                if (minPoiDist > 1) {
+                    const landDiorama = ProceduralModels.createLandHexDiorama(spec, surfaceY + 0.04, this.animatedLandProps);
+                    landDiorama.scale.setScalar(minPoiDist === 2 ? 0.66 : 0.74);
+                    landDiorama.position.x = x;
+                    landDiorama.position.z = z;
+                    this.staticDioramaGroup.add(landDiorama);
+                }
             }
         } else if (spec.isSpawnRim) {
             const buoy = ProceduralModels.createStartingAnchorBuoy();
@@ -1021,9 +1702,25 @@ class World3D {
             labelSprite: null
         };
 
-        baseMesh.userData = { tile: tileObj };
-        rimMesh.userData = { tile: tileObj };
-        highlightRing.userData = { tile: tileObj };
+        if (baseMesh) baseMesh.userData = { tile: tileObj };
+        if (rimMesh) rimMesh.userData = { tile: tileObj };
+        if (highlightRing) highlightRing.userData = { tile: tileObj };
+
+        // Helper: Raised Emissive Hexagonal Pedestal Rim under Interactive POIs (zero extra lights!)
+        const addPOIEmissiveRim = (colHex, emissiveHex) => {
+            const rimGeo = new THREE.CylinderGeometry(this.hexRadius * 0.90, this.hexRadius * 0.96, 0.11, 6, 1, true);
+            const rimMat = new THREE.MeshLambertMaterial({
+                color: colHex,
+                emissive: emissiveHex,
+                emissiveIntensity: 0.85,
+                side: THREE.DoubleSide
+            });
+            const pedRim = new THREE.Mesh(rimGeo, rimMat);
+            pedRim.position.y = surfaceY + 0.055;
+            pedRim.userData = { baseEmissiveIntensity: 0.85 };
+            group.add(pedRim);
+            tileObj.poiEmissiveRim = pedRim;
+        };
 
         if (spec.monumentId) {
             const monData = window.GAME_DATA.monuments.find(m => m.id === spec.monumentId);
@@ -1033,105 +1730,110 @@ class World3D {
             group.add(monModel);
             tileObj.propModel = monModel;
 
-            // Radiant Monument Sky Beacon + Double Magic Halo Rings + 3 Orbiting Crystals
-            const tierHexColors = { 1: 0x10b981, 2: 0xf59e0b, 3: 0xef4444 };
+            // Tier-colored Emissive Base Rim for Monuments (Tier 1: Emerald, Tier 2: Gold, Tier 3: Orange-Red)
+            const tierRimPalette = {
+                1: { col: 0x10b981, em: 0x059669 },
+                2: { col: 0xfbbf24, em: 0xf59e0b },
+                3: { col: 0xf97316, em: 0xea580c }
+            }[tier] || { col: 0xfbbf24, em: 0xf59e0b };
+            addPOIEmissiveRim(tierRimPalette.col, tierRimPalette.em);
+
+            // Soft AdditiveBlending Vertical Light Column ONLY for Tier 2 & Tier 3 Monuments (opacity 0.15)
+            const tierHexColors = { 1: 0x10b981, 2: 0xf59e0b, 3: 0xf97316 };
             const glowHex = tierHexColors[tier] || 0xfbbf24;
-            const glowGroup = new THREE.Group();
-            glowGroup.position.y = surfaceY;
+            if (tier >= 2) {
+                const glowGroup = new THREE.Group();
+                glowGroup.position.y = surfaceY;
 
-            // 1. Vertical Sky Beacon Pillar
-            const beaconGeo = new THREE.CylinderGeometry(0.18, 0.72, 6.2, 16, 1, true);
-            const beaconMat = new THREE.MeshBasicMaterial({
-                color: glowHex,
-                transparent: true,
-                opacity: 0.24,
-                side: THREE.DoubleSide,
-                depthWrite: false
-            });
-            const beaconMesh = new THREE.Mesh(beaconGeo, beaconMat);
-            beaconMesh.position.y = 3.1;
-            glowGroup.add(beaconMesh);
+                const beaconGeo = new THREE.CylinderGeometry(0.18, 0.68, 6.4, 12, 1, true);
+                const beaconMat = new THREE.MeshBasicMaterial({
+                    color: glowHex,
+                    transparent: true,
+                    opacity: 0.15,
+                    blending: THREE.AdditiveBlending,
+                    side: THREE.DoubleSide,
+                    depthWrite: false
+                });
+                const beaconMesh = new THREE.Mesh(beaconGeo, beaconMat);
+                beaconMesh.position.y = 3.8;
+                glowGroup.add(beaconMesh);
 
-            // 2. Pulsing Outer Hex Halo Ring
-            const outerHaloGeo = new THREE.RingGeometry(this.hexRadius * 0.80, this.hexRadius * 1.02, 6);
-            outerHaloGeo.rotateX(-Math.PI / 2);
-            outerHaloGeo.rotateZ(Math.PI / 6);
-            const outerHalo = new THREE.Mesh(
-                outerHaloGeo,
-                new THREE.MeshBasicMaterial({ color: glowHex, transparent: true, opacity: 0.75, side: THREE.DoubleSide })
-            );
-            outerHalo.position.y = 0.04;
-            glowGroup.add(outerHalo);
-
-            // 3. Inner Golden Magic Ring
-            const innerHaloGeo = new THREE.RingGeometry(0.95, 1.25, 24);
-            innerHaloGeo.rotateX(-Math.PI / 2);
-            const innerHalo = new THREE.Mesh(
-                innerHaloGeo,
-                new THREE.MeshBasicMaterial({ color: 0xfef08a, transparent: true, opacity: 0.65, side: THREE.DoubleSide })
-            );
-            innerHalo.position.set(-0.42, 0.06, -0.38);
-            glowGroup.add(innerHalo);
-
-            // 4. Orbiting Floating Star Crystals
-            const orbitGroup = new THREE.Group();
-            orbitGroup.position.set(-0.42, 1.35, -0.38);
-            for (let c = 0; c < 3; c++) {
-                const ang = (c / 3) * Math.PI * 2;
-                const crys = new THREE.Mesh(
-                    new THREE.OctahedronGeometry(0.14, 0),
-                    new THREE.MeshBasicMaterial({ color: 0xfef08a })
-                );
-                crys.position.set(Math.cos(ang) * 0.95, 0, Math.sin(ang) * 0.95);
-                orbitGroup.add(crys);
+                glowGroup.userData = { beaconMesh, baseColor: glowHex };
+                group.add(glowGroup);
+                tileObj.monumentGlowGroup = glowGroup;
             }
-            glowGroup.add(orbitGroup);
-
-            glowGroup.userData = { beaconMesh, outerHalo, innerHalo, orbitGroup, baseColor: glowHex };
-            group.add(glowGroup);
-            tileObj.monumentGlowGroup = glowGroup;
 
             const tierShortLabel = {
                 1: "★ Cấp 1 (Dễ)",
                 2: "★★ Cấp 2 (Vừa)",
                 3: "★★★ Cấp 3 (Khó)"
             };
-            const tierColors = { 1: "#10b981", 2: "#f59e0b", 3: "#ef4444" };
+            const tierColors = { 1: "#10b981", 2: "#fbbf24", 3: "#f87171" };
+            // Zoom-In Full Name Sprite + Zoom-Out Compact Icon Sprite (🏛️)
             const sprite = ProceduralModels.createLabelCanvas(
                 `🏛️ ${monData.name}`,
                 tierShortLabel[tier],
-                "rgba(4, 15, 30, 0.92)",
+                "rgba(15, 23, 42, 0.90)",
                 tierColors[tier],
                 2.55,
-                0.60
+                0.64
             );
-            sprite.position.set(-0.42, surfaceY + 2.55, -0.38);
+            sprite.position.set(0, surfaceY + 4.45, 0);
             group.add(sprite);
             tileObj.labelSprite = sprite;
 
+            const iconSprite = ProceduralModels.createCompactPOIIconSprite("🏛️", tierColors[tier], 1.28);
+            iconSprite.position.set(0, surfaceY + 4.35, 0);
+            group.add(iconSprite);
+            tileObj.iconSprite = iconSprite;
+
         } else if (spec.isPort) {
-            const portModel = ProceduralModels.createTradePortModel(region.color);
+            const portModel = ProceduralModels.createTradePortModel(region.color, spec.regionId);
             portModel.position.y = surfaceY;
             group.add(portModel);
             tileObj.propModel = portModel;
 
+            // Cyan Emissive Base Rim for Trade Ports
+            addPOIEmissiveRim(0x22d3ee, 0x06b6d4);
+
+            // Zoom-In Full Name Sprite + Zoom-Out Compact Icon Sprite (⚓)
             const sprite = ProceduralModels.createLabelCanvas(
                 `⚓ ${spec.portName}`,
                 `${region.specialty.icon} ${region.specialty.shortName}`,
-                "rgba(10, 32, 56, 0.92)",
-                "#38bdf8",
-                2.45,
-                0.56
+                "rgba(15, 23, 42, 0.90)",
+                "#22d3ee",
+                2.40,
+                0.58
             );
-            sprite.position.set(-0.42, surfaceY + 2.08, -0.38);
+            sprite.position.set(0, surfaceY + 3.25, 0);
             group.add(sprite);
             tileObj.labelSprite = sprite;
+
+            const iconSprite = ProceduralModels.createCompactPOIIconSprite("⚓", "#22d3ee", 1.20);
+            iconSprite.position.set(0, surfaceY + 3.15, 0);
+            group.add(iconSprite);
+            tileObj.iconSprite = iconSprite;
 
         } else if (spec.resourceType) {
             const resModel = ProceduralModels.createResourceNodeModel(spec.resourceType);
             resModel.position.y = surfaceY;
             group.add(resModel);
             tileObj.propModel = resModel;
+
+            // Resource-colored Emissive Base Rim
+            const resStyle = {
+                food: { col: 0xfacc15, em: 0xca8a04 },
+                wood: { col: 0x4ade80, em: 0x15803d },
+                iron: { col: 0xe2e8f0, em: 0x94a3b8 }
+            }[spec.resourceType] || { col: 0xfacc15, em: 0xca8a04 };
+
+            addPOIEmissiveRim(resStyle.col, resStyle.em);
+
+            // Visual Hierarchy Tier 3: Resource Nodes show compact icon badge ONLY at distance (full name on hover!)
+            const iconSprite = ProceduralModels.createCompactResourceIconSprite(spec.resourceType);
+            iconSprite.position.set(0, surfaceY + 2.35, 0);
+            group.add(iconSprite);
+            tileObj.labelSprite = iconSprite;
         }
 
         if (tileObj.propModel) {
@@ -1154,9 +1856,6 @@ class World3D {
                 child.userData = child.userData || {};
                 child.userData.tile = tileObj;
                 tileObj.propMeshes.push(child);
-                if (tileObj.navigable) {
-                    this.pickableMeshes.push(child);
-                }
             }
         });
     }
@@ -1194,21 +1893,21 @@ class World3D {
         chosen.hasNPC = true;
         const surfaceY = chosen.height - 0.1;
 
-        const npcModel = ProceduralModels.createNPCharacterModel("#38bdf8", false);
-        npcModel.position.set(-0.42, surfaceY, -0.38);
+        const npcModel = ProceduralModels.createFDIShipModel();
+        npcModel.position.set(0, surfaceY, 0);
         chosen.group.add(npcModel);
         chosen.propModel = npcModel;
         this.cacheTilePropMeshes(chosen);
 
         const sprite = ProceduralModels.createLabelCanvas(
-            "🧙‍♂️ Tiên Ông Rìu Vàng",
-            "Giải đố +2~3 Xu",
-            "rgba(15, 23, 42, 0.92)",
+            "🚢 Tàu FDI Quốc Tế",
+            "Thương Đoàn • +2~3 Xu",
+            "rgba(8, 17, 34, 0.95)",
             "#fbbf24",
-            2.35,
-            0.55
+            2.45,
+            0.60
         );
-        sprite.position.set(-0.42, surfaceY + 2.1, -0.38);
+        sprite.position.set(0, surfaceY + 2.75, 0);
         chosen.group.add(sprite);
         chosen.labelSprite = sprite;
 
@@ -1253,6 +1952,11 @@ class World3D {
             shipMesh.userData.isLocalPlayer = isLocal;
             shipMesh.userData.lastQ = p.q;
             shipMesh.userData.lastR = p.r;
+            shipMesh.userData.wavePhase = Math.random() * Math.PI * 2;
+            shipMesh.userData.isMoving = false;
+            shipMesh.userData.moveSpeedNorm = 0;
+            shipMesh.userData.turnBankRad = 0;
+            shipMesh.userData.movePitchRad = 0;
             shipMesh.visible = !p.eliminated;
             this.scene.add(shipMesh);
             this.shipMeshes.set(shipKey, shipMesh);
@@ -1312,6 +2016,7 @@ class World3D {
         shipMesh.userData.lastR = r;
         const dockPos = this.getShipDockPositionOnTile(tile, player, playerIdx, totalPlayers);
         shipMesh.position.copy(dockPos);
+        shipMesh.userData.dockBaseY = dockPos.y;
     }
 
     animateShipAlongPath(player, pathTiles, playerIdx = 0, totalPlayers = 1, onComplete = null) {
@@ -1341,64 +2046,103 @@ class World3D {
             }
         });
 
-        let segIndex = 0;
-        const segDuration = 290;
+        const endPos = waypoints[waypoints.length - 1];
+        const useCurve = waypoints.length >= 3 && typeof THREE.CatmullRomCurve3 === "function";
+        const curve = useCurve ? new THREE.CatmullRomCurve3(waypoints, false, "centripetal", 0.5) : null;
 
-        const runNextSegment = () => {
-            if (segIndex >= waypoints.length - 1) {
-                if (onComplete) onComplete();
-                return;
+        // Snappy total duration: ease-in -> steady cruise -> ease-out
+        const totalDuration = Math.min(1850, Math.max(360, pathTiles.length * 320));
+        const animToken = (shipMesh.userData._animToken || 0) + 1;
+        shipMesh.userData._animToken = animToken;
+        shipMesh.userData.isMoving = true;
+
+        // Smooth trapezoidal cruise easing (first 20% ease-in, middle 60% steady, last 20% ease-out)
+        const cruiseEase = (u) => {
+            if (u <= 0) return 0;
+            if (u >= 1) return 1;
+            const a = 0.20;
+            const norm = 1 / (1 - a); // 1.25
+            if (u < a) return 0.5 * (u * u / a) * norm;
+            if (u > 1 - a) {
+                const r = 1 - u;
+                return 1 - 0.5 * (r * r / a) * norm;
             }
-
-            const startPos = waypoints[segIndex];
-            const endPos = waypoints[segIndex + 1];
-            const startRotY = shipMesh.rotation.y;
-            const dx = endPos.x - startPos.x;
-            const dz = endPos.z - startPos.z;
-            let targetRotY = startRotY;
-            if (Math.hypot(dx, dz) > 0.02) {
-                targetRotY = -Math.atan2(dz, dx);
-            }
-
-            let deltaAngle = targetRotY - startRotY;
-            while (deltaAngle > Math.PI) deltaAngle -= Math.PI * 2;
-            while (deltaAngle < -Math.PI) deltaAngle += Math.PI * 2;
-
-            window.SFX.playSail();
-            const segStart = performance.now();
-            let lastWakeTime = segStart;
-
-            const step = (now) => {
-                const t = Math.min(1, (now - segStart) / segDuration);
-                const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
-
-                shipMesh.position.lerpVectors(startPos, endPos, ease);
-                shipMesh.rotation.y = startRotY + deltaAngle * Math.min(1, t * 1.65);
-
-                if (shipMesh.userData.mainSail) {
-                    const swell = 1.0 + Math.sin(t * Math.PI) * 0.22;
-                    shipMesh.userData.mainSail.scale.set(swell, 1.0, swell);
-                }
-
-                if (now - lastWakeTime > 48) {
-                    lastWakeTime = now;
-                    this.spawnWakeParticle(shipMesh.position.x, shipMesh.position.y, shipMesh.position.z);
-                }
-
-                if (t < 1) {
-                    requestAnimationFrame(step);
-                } else {
-                    if (shipMesh.userData.mainSail) {
-                        shipMesh.userData.mainSail.scale.set(1, 1, 1);
-                    }
-                    segIndex++;
-                    runNextSegment();
-                }
-            };
-            requestAnimationFrame(step);
+            return (u - 0.5 * a) * norm;
         };
 
-        runNextSegment();
+        const samplePoint = (s) => {
+            if (curve) return curve.getPoint(s);
+            return new THREE.Vector3().lerpVectors(waypoints[0], endPos, s);
+        };
+
+        const sampleTangent = (s) => {
+            if (curve) return curve.getTangent(s);
+            return new THREE.Vector3(endPos.x - waypoints[0].x, 0, endPos.z - waypoints[0].z);
+        };
+
+        window.SFX.playSail();
+        const startTime = performance.now();
+        let prevTime = startTime;
+        let lastWakeTime = startTime;
+        let currentYaw = shipMesh.rotation.y;
+        let currentBank = 0;
+
+        const step = (now) => {
+            if (shipMesh.userData._animToken !== animToken) return;
+
+            const dt = Math.min(0.05, Math.max(0.004, (now - prevTime) / 1000));
+            prevTime = now;
+
+            const u = Math.min(1, (now - startTime) / totalDuration);
+            const s = cruiseEase(u);
+
+            // Instantaneous speed profile (0 at start/end, ~1.0 at cruise)
+            const eps = 0.01;
+            const speedNorm = Math.min(1.2, Math.max(0, (cruiseEase(Math.min(1, u + eps)) - cruiseEase(Math.max(0, u - eps))) / (2 * eps)));
+
+            // 1. Position along smooth CatmullRomCurve3
+            const pos = samplePoint(s);
+            shipMesh.position.set(pos.x, pos.y + Math.sin(u * Math.PI) * 0.05, pos.z);
+
+            // 2. Shortest-angle Yaw lerp along curve tangent + Turn Banking (Roll 8°–12°) + Acceleration Pitch (~4°–6°)
+            const tan = sampleTangent(Math.min(0.995, s));
+            let yawDiff = 0;
+            if (Math.hypot(tan.x, tan.z) > 0.005) {
+                const targetYaw = -Math.atan2(tan.z, tan.x);
+                yawDiff = ((targetYaw - currentYaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+                currentYaw += yawDiff * Math.min(1, dt * 13.0);
+                shipMesh.rotation.y = currentYaw;
+            }
+
+            // Roll into turn up to ±11° (±0.19 rad), level out on straightaways
+            const targetBank = Math.max(-0.20, Math.min(0.20, -yawDiff * 0.65 * speedNorm));
+            currentBank += (targetBank - currentBank) * Math.min(1, dt * 10.0);
+
+            shipMesh.userData.moveSpeedNorm = speedNorm;
+            shipMesh.userData.turnBankRad = currentBank;
+            shipMesh.userData.movePitchRad = 0.088 * speedNorm; // ~5° bow rise while cruising!
+
+            // 3. Emit pooled V-shaped wake foam behind stern while moving
+            if (speedNorm > 0.18 && (now - lastWakeTime) > 58) {
+                lastWakeTime = now;
+                this.spawnWakeParticle(shipMesh.position.x, pos.y, shipMesh.position.z, currentYaw, speedNorm);
+            }
+
+            if (u < 1) {
+                requestAnimationFrame(step);
+            } else {
+                // Exact 100% arrival at destination tile center / berth
+                shipMesh.position.copy(endPos);
+                shipMesh.userData.dockBaseY = endPos.y;
+                shipMesh.userData.isMoving = false;
+                shipMesh.userData.moveSpeedNorm = 0;
+                shipMesh.userData.turnBankRad = 0;
+                shipMesh.userData.movePitchRad = 0;
+                if (onComplete) onComplete();
+            }
+        };
+
+        requestAnimationFrame(step);
     }
 
     showPathPreview(pathTiles, isCustomDrawn = false) {
@@ -1447,21 +2191,7 @@ class World3D {
         }
     }
 
-    spawnWakeParticle(x, y, z) {
-        const geo = new THREE.RingGeometry(0.14, 0.36, 14);
-        geo.rotateX(-Math.PI / 2);
-        const mat = new THREE.MeshBasicMaterial({ color: 0xe0f2fe, transparent: true, opacity: 0.78, side: THREE.DoubleSide });
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.position.set(x, y + 0.02, z);
-        this.effectsGroup.add(mesh);
-
-        this.floatingEffects.push({
-            mesh,
-            type: "wake",
-            birth: performance.now(),
-            life: 620
-        });
-    }
+    // (spawnWakeParticle is now object-pooled above in initWakePool)
 
     triggerBurstAnimation(q, r, colorHex = 0xfbbf24, count = 20) {
         const tile = this.hexMap.get(`${q},${r}`);
@@ -1515,6 +2245,7 @@ class World3D {
         this.reachablePaths = reachablePathsMap;
         this.activeHexKey = activeHexKey;
         this.hexTiles.forEach(tile => {
+            if (!tile.highlightRing) return;
             if (this.hoveredHex === tile) {
                 const key = `${tile.q},${tile.r}`;
                 if (this.reachablePaths && this.reachablePaths.has(key)) {
@@ -1693,6 +2424,7 @@ class World3D {
             const h = this.container.clientHeight || window.innerHeight;
             this.camera.aspect = w / h;
             this.camera.updateProjectionMatrix();
+            this.renderer.setPixelRatio(this.getOptimalPixelRatio());
             this.renderer.setSize(w, h);
         });
 
@@ -1803,8 +2535,9 @@ class World3D {
 
         this.renderer.domElement.addEventListener("pointermove", (e) => {
             const now = performance.now();
+            // Throttle hover raycast to 40ms (30-50ms target) for low CPU usage
             if (!this.isDrawingCustomPath && !this.isClickDrawMode && !isLeftPointerDown) {
-                if (now - lastHoverRaycastTime < 22) return;
+                if (now - lastHoverRaycastTime < 40) return;
             }
             lastHoverRaycastTime = now;
 
@@ -1911,30 +2644,105 @@ class World3D {
         });
     }
 
+    // ------------------------------------------------------------------------
+    // 3D FLOATING QUICK EMOTE SPEECH BUBBLE ABOVE SHIP (3.5s, ZERO POINTLIGHT)
+    // ------------------------------------------------------------------------
+    showShipEmoteBubble(shipKey, text, durationMs = 3500) {
+        if (!this.shipMeshes || !shipKey || !text) return;
+        const shipMesh = this.shipMeshes.get(shipKey);
+        if (!shipMesh) return;
+
+        // Remove any existing emote bubble on this ship
+        if (shipMesh.userData.emoteBubble) {
+            shipMesh.remove(shipMesh.userData.emoteBubble);
+            if (shipMesh.userData.emoteTimer) {
+                clearTimeout(shipMesh.userData.emoteTimer);
+            }
+            shipMesh.userData.emoteBubble = null;
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = 512;
+        canvas.height = 148;
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, 512, 148);
+
+        // Cream parchment bubble with navy-gold border + bottom pointer triangle
+        ctx.fillStyle = "rgba(15, 41, 66, 0.94)";
+        ctx.strokeStyle = "#f4cd68";
+        ctx.lineWidth = 6;
+        ctx.beginPath();
+        if (typeof ctx.roundRect === "function") {
+            ctx.roundRect(18, 14, 476, 98, 28);
+        } else {
+            ctx.rect(18, 14, 476, 98);
+        }
+        ctx.fill();
+        ctx.stroke();
+
+        // Pointer triangle
+        ctx.beginPath();
+        ctx.moveTo(234, 112);
+        ctx.lineTo(256, 140);
+        ctx.lineTo(278, 112);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.font = "800 34px 'Be Vietnam Pro', 'Segoe UI', Arial, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#fef3c7";
+        ctx.fillText(String(text).slice(0, 26), 256, 64);
+
+        const tex = new THREE.CanvasTexture(canvas);
+        const spMat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+        const sprite = new THREE.Sprite(spMat);
+        sprite.scale.set(4.2, 1.22, 1);
+        sprite.position.set(0, 4.55, 0);
+        sprite.renderOrder = 30;
+        shipMesh.add(sprite);
+        shipMesh.userData.emoteBubble = sprite;
+
+        shipMesh.userData.emoteTimer = setTimeout(() => {
+            if (shipMesh.userData.emoteBubble === sprite) {
+                shipMesh.remove(sprite);
+                shipMesh.userData.emoteBubble = null;
+            }
+        }, durationMs);
+    }
+
     startRenderLoop() {
         const animate = () => {
             requestAnimationFrame(animate);
             const delta = Math.min(0.05, this.clock.getDelta());
             const elapsed = this.clock.getElapsedTime();
             const now = performance.now();
+            this._frameCount = (this._frameCount || 0) + 1;
+            const isSmoothMode = this.graphicsQuality === "smooth";
+            const showWildlife = !this.minimalistMode && !isSmoothMode;
 
-            // 1. Dynamic Ocean Waves
+            // 1. Dynamic Ocean Waves (30Hz vertex update in Pretty mode; zero-CPU swell in Smooth mode)
             if (this.oceanMesh) {
-                const pos = this.oceanMesh.geometry.attributes.position;
                 const amp = this.waveMultiplier || 1.0;
-                for (let i = 0; i < pos.count; i++) {
-                    const vx = pos.getX(i);
-                    const vz = pos.getZ(i);
-                    const wave = Math.sin(vx * 0.16 + elapsed * 1.75) * 0.095 * amp +
-                                 Math.cos(vz * 0.19 + elapsed * 1.45) * 0.085 * amp +
-                                 Math.sin((vx + vz) * 0.09 + elapsed * 2.15) * 0.055 * amp;
-                    pos.setY(i, this.oceanBaseY[i] + wave);
+                if (isSmoothMode) {
+                    this.oceanMesh.position.y = -0.22 + Math.sin(elapsed * 1.1) * 0.04 * amp;
+                } else if (this._frameCount % 2 === 0) {
+                    const pos = this.oceanMesh.geometry.attributes.position;
+                    for (let i = 0; i < pos.count; i++) {
+                        const vx = pos.getX(i);
+                        const vz = pos.getZ(i);
+                        const wave = Math.sin(vx * 0.16 + elapsed * 1.75) * 0.095 * amp +
+                                     Math.cos(vz * 0.19 + elapsed * 1.45) * 0.085 * amp +
+                                     Math.sin((vx + vz) * 0.09 + elapsed * 2.15) * 0.055 * amp;
+                        pos.setY(i, this.oceanBaseY[i] + wave);
+                    }
+                    pos.needsUpdate = true;
+                    this.oceanMesh.geometry.computeVertexNormals();
                 }
-                pos.needsUpdate = true;
-                this.oceanMesh.geometry.computeVertexNormals();
             }
 
-            if (!this.minimalistMode) {
+            if (showWildlife) {
                 this.foamRings.forEach(f => {
                     const s = 0.8 + Math.sin(elapsed * f.speed + f.phase) * 0.35;
                     f.mesh.scale.set(s, s, s);
@@ -1942,34 +2750,109 @@ class World3D {
                 });
             }
 
-            // 1b. Rain Particle Field (Tropical Rain / Thunderstorm / Super Typhoon Yagi)
+            // 1a. Smooth ~2s Weather Color/Lighting Interpolation (Zero allocations!)
+            if (this._weatherLerpElapsed < this._weatherLerpDuration) {
+                this._weatherLerpElapsed = Math.min(this._weatherLerpDuration, this._weatherLerpElapsed + delta);
+                const rawP = this._weatherLerpElapsed / this._weatherLerpDuration;
+                const t = rawP * rawP * (3 - 2 * rawP); // Smoothstep easing
+                const f = this._weatherFrom;
+                const to = this._weatherTo;
+
+                this.scene.background.copy(f.bg).lerp(to.bg, t);
+                this.scene.fog.color.copy(f.fog).lerp(to.fog, t);
+                if (this.oceanMesh && this.oceanMesh.material) {
+                    this.oceanMesh.material.color.copy(f.oceanCol).lerp(to.oceanCol, t);
+                    if (this.oceanMesh.material.emissive) {
+                        this.oceanMesh.material.emissive.copy(f.oceanEm).lerp(to.oceanEm, t);
+                    }
+                    this.oceanMesh.material.emissiveIntensity = f.oceanEmInt + (to.oceanEmInt - f.oceanEmInt) * t;
+                }
+                this.hemiLight.color.copy(f.hemiSky).lerp(to.hemiSky, t);
+                this.hemiLight.groundColor.copy(f.hemiGround).lerp(to.hemiGround, t);
+                this.hemiLight.intensity = f.hemiInt + (to.hemiInt - f.hemiInt) * t;
+                this.sunLight.color.copy(f.sunCol).lerp(to.sunCol, t);
+                this._baseSunIntensity = f.sunInt + (to.sunInt - f.sunInt) * t;
+                this.sunLight.position.lerpVectors(f.sunPos, to.sunPos, t);
+                if (this.sunGroup && this.sunCoreMat && this.sunGlowMat) {
+                    this.sunGroup.position.lerpVectors(f.sunObjPos, to.sunObjPos, t);
+                    const sScale = f.sunObjScale + (to.sunObjScale - f.sunObjScale) * t;
+                    this.sunGroup.scale.setScalar(sScale);
+                    this.sunCoreMat.color.copy(f.sunCoreCol).lerp(to.sunCoreCol, t);
+                    this.sunGlowMat.color.copy(f.sunGlowCol).lerp(to.sunGlowCol, t);
+                    const coreOp = f.sunCoreOp + (to.sunCoreOp - f.sunCoreOp) * t;
+                    const glowOp = f.sunGlowOp + (to.sunGlowOp - f.sunGlowOp) * t;
+                    this.sunCoreMat.opacity = coreOp;
+                    this.sunGlowMat.opacity = glowOp;
+                    this.sunGroup.visible = (coreOp > 0.01 || glowOp > 0.01);
+                }
+                this.cloudMaterial.color.copy(f.cloudCol).lerp(to.cloudCol, t);
+                this.cloudMaterial.opacity = f.cloudOp + (to.cloudOp - f.cloudOp) * t;
+                this.starField.material.opacity = f.starsOp + (to.starsOp - f.starsOp) * t;
+                if (this.rainField) {
+                    this.rainField.material.opacity = f.rainOp + (to.rainOp - f.rainOp) * t;
+                }
+                this.waveMultiplier = f.waveAmp + (to.waveAmp - f.waveAmp) * t;
+
+                this._curSkyTop.copy(f.skyTop).lerp(to.skyTop, t);
+                this._curSkyMid.copy(f.skyMid).lerp(to.skyMid, t);
+                this._curSkyBot.copy(f.skyBot).lerp(to.skyBot, t);
+                if (this._frameCount % 2 === 0 || rawP >= 1.0) {
+                    this.updateSkyDomeGradient(this._curSkyTop, this._curSkyMid, this._curSkyBot);
+                }
+            }
+
+            // 1a-ii. Subtle Lightning Flash during Thunderstorm & Super Typhoon Yagi (120ms pulse to ~2.1, every 6-11s)
+            if (this.weatherMode === "thunderstorm" || this.weatherMode === "super_typhoon_yagi") {
+                if (this._nextLightningAt > 0 && now >= this._nextLightningAt) {
+                    this._lightningEndAt = now + 120;
+                    this._nextLightningAt = now + 6000 + Math.random() * 5000;
+                }
+                if (now < this._lightningEndAt) {
+                    const remain = (this._lightningEndAt - now) / 120;
+                    this.sunLight.intensity = this._baseSunIntensity + (2.1 - this._baseSunIntensity) * remain;
+                } else {
+                    this.sunLight.intensity = this._baseSunIntensity;
+                }
+            } else {
+                this.sunLight.intensity = this._baseSunIntensity;
+            }
+
+            // 1b. Unified Rain & Storm Particle Field (1 THREE.Points BufferGeometry, wind-slanted in Storm/Yagi)
             if (this.rainField && this.rainField.material.opacity > 0.01) {
                 const rPos = this.rainField.geometry.attributes.position;
-                const fallSpeed = (this.weatherMode === "super_typhoon_yagi" ? 38 : 26) * delta;
-                const windDrift = (this.weatherMode === "super_typhoon_yagi" ? -12 : -4) * delta;
+                const isYagi = this.weatherMode === "super_typhoon_yagi";
+                const isStorm = this.weatherMode === "thunderstorm";
+                const fallSpeed = (isYagi ? 38 : (isStorm ? 31 : 25)) * delta;
+                const windDriftX = (isYagi ? -16 : (isStorm ? -10 : -3.5)) * delta;
+                const windDriftZ = (isYagi ? 6.5 : (isStorm ? 4.2 : 1.0)) * delta;
                 for (let i = 0; i < rPos.count; i++) {
                     let y = rPos.getY(i) - fallSpeed;
-                    let x = rPos.getX(i) + windDrift;
-                    if (y < 0) {
+                    let x = rPos.getX(i) + windDriftX;
+                    let z = rPos.getZ(i) + windDriftZ;
+                    if (y < 0 || x < -95 || z > 95) {
                         y = 52 + Math.random() * 5;
                         x = (Math.random() - 0.5) * 190;
+                        z = (Math.random() - 0.5) * 190;
                     }
                     rPos.setY(i, y);
                     rPos.setX(i, x);
+                    rPos.setZ(i, z);
                 }
                 rPos.needsUpdate = true;
             }
 
-            // 2. Sky Clouds
-            if (this.cloudsVisible) {
-                this.clouds.forEach(c => {
-                    c.mesh.position.x += c.speed * 0.012;
-                    c.mesh.position.y += Math.sin(elapsed * 0.8 + c.bobOffset) * 0.002;
-                    if (c.mesh.position.x > 85) c.mesh.position.x = -85;
-                });
+            // 2. Sky Clouds (Single InstancedMesh updated cleanly)
+            if (this.cloudsVisible && !isSmoothMode && this.cloudInstancedMesh) {
+                for (let i = 0; i < this.clouds.length; i++) {
+                    const c = this.clouds[i];
+                    c.x += c.speed * 0.012;
+                    c.y += Math.sin(elapsed * 0.8 + c.bobOffset) * 0.002;
+                    if (c.x > 85) c.x = -85;
+                }
+                this.updateCloudInstances(elapsed);
             }
 
-            if (!this.minimalistMode) {
+            if (showWildlife) {
                 // 3. Ambient Sea Lighthouses & Offshore Oil Rigs
                 this.ambientLighthouses.forEach(lh => {
                     if (lh.beam) {
@@ -2026,22 +2909,61 @@ class World3D {
                     fs.mesh.rotation.y = -ang + Math.PI / 2;
                 });
 
-                // 7. Flapping Seagull Flocks
+                // 7. Flapping Seagull Flocks (Elliptical orbits, nose accurately aligned to flight tangent!)
                 this.ambientSeagulls.forEach(sg => {
                     const ang = elapsed * sg.speed + sg.phase;
-                    sg.mesh.position.x = sg.cx + Math.cos(ang) * sg.r;
-                    sg.mesh.position.z = sg.cz + Math.sin(ang) * sg.r;
-                    sg.mesh.position.y = sg.y + Math.sin(elapsed * 1.4 + sg.phase) * 0.45;
-                    sg.mesh.rotation.y = -ang;
+                    const rx = sg.rx || sg.r || 12;
+                    const rz = sg.rz || sg.r || 9;
+                    const nx = sg.cx + Math.cos(ang) * rx;
+                    const nz = sg.cz + Math.sin(ang) * rz;
+                    const vx = -Math.sin(ang) * rx;
+                    const vz = Math.cos(ang) * rz;
+                    sg.mesh.position.x = nx;
+                    sg.mesh.position.z = nz;
+                    sg.mesh.position.y = sg.y + Math.sin(elapsed * 1.2 + sg.phase) * 0.40;
+                    sg.mesh.rotation.y = -Math.atan2(vz, vx);
                     const birdWings = sg.wings || sg.birds;
                     if (Array.isArray(birdWings)) {
                         birdWings.forEach((b, bIdx) => {
-                            const flap = Math.sin(elapsed * 7.5 + (b.flapPhase || bIdx * 1.2)) * 0.48;
-                            if (b.wingL) b.wingL.rotation.z = 0.15 + flap;
-                            if (b.wingR) b.wingR.rotation.z = -0.15 - flap;
+                            const flap = Math.sin(elapsed * 6.2 + (b.flapPhase || bIdx * 1.15)) * 0.42;
+                            if (b.wingL) b.wingL.rotation.x = 0.12 + flap;
+                            if (b.wingR) b.wingR.rotation.x = -0.12 - flap;
                         });
                     }
                 });
+
+                // 7b. Tiny Decorative Cargo Ships gliding very slowly along the far SE Shipping Lane
+                if (this.ambientCargoShips && this.shippingLaneWaypoints && this.shippingLaneWaypoints.length >= 2) {
+                    const pts = this.shippingLaneWaypoints;
+                    const segCount = pts.length - 1;
+                    this.ambientCargoShips.forEach(cs => {
+                        cs.progress = (cs.progress + cs.speed * delta * cs.dir + 1.0) % 1.0;
+                        const scaled = cs.progress * segCount;
+                        const segIdx = Math.min(segCount - 1, Math.floor(scaled));
+                        const frac = scaled - segIdx;
+                        const p0 = pts[segIdx];
+                        const p1 = pts[segIdx + 1];
+                        const nx = p0.x + (p1.x - p0.x) * frac;
+                        const nz = p0.z + (p1.z - p0.z) * frac;
+                        const dx = (p1.x - p0.x) * cs.dir;
+                        const dz = (p1.z - p0.z) * cs.dir;
+                        cs.mesh.position.set(nx, -0.14 + Math.sin(elapsed * 1.6 + cs.phase) * 0.03, nz);
+                        cs.mesh.rotation.y = -Math.atan2(dz, dx);
+                    });
+                }
+
+                // 7c. Slow Low-Poly Whale Silhouettes gliding calmly in outer empty sea
+                if (this.ambientWhales) {
+                    this.ambientWhales.forEach(wh => {
+                        const ang = elapsed * wh.speed + wh.phase;
+                        const nx = wh.cx + Math.cos(ang) * wh.rx;
+                        const nz = wh.cz + Math.sin(ang) * wh.rz;
+                        const vx = -Math.sin(ang) * wh.rx;
+                        const vz = Math.cos(ang) * wh.rz;
+                        wh.mesh.position.set(nx, -0.16 + Math.sin(elapsed * 0.7 + wh.phase) * 0.12, nz);
+                        wh.mesh.rotation.y = -Math.atan2(vz, vx);
+                    });
+                }
             }
 
             // 8. Animated Regional Mainland Props (Waterwheels, Windmills, Turbines, Smoke, Lanterns, Boats)
@@ -2098,20 +3020,35 @@ class World3D {
                         ship.scale.setScalar(curShipSc + (targetShipSc - curShipSc) * Math.min(1, delta * 8.0));
                     }
                 }
-                ship.rotation.z = Math.sin(elapsed * 2.3 + shipIdx) * wavePitch;
-                ship.rotation.x = Math.cos(elapsed * 1.85 + shipIdx) * (wavePitch * 0.78);
+                const ph = ship.userData.wavePhase !== undefined ? ship.userData.wavePhase : (shipIdx * 1.7);
+                const moveBoost = ship.userData.isMoving ? (ship.userData.moveSpeedNorm || 0.8) : 0;
+                const turnBank = ship.userData.turnBankRad || 0;
+                const movePitch = ship.userData.movePitchRad || 0;
+
+                // Idle vertical wave bobbing (unique phase per ship so they never rock in unison)
+                if (!ship.userData.isMoving && ship.userData.dockBaseY !== undefined) {
+                    ship.position.y = ship.userData.dockBaseY + Math.sin(elapsed * 2.1 + ph) * 0.045;
+                }
+
+                // Combined physical Pitch (bow-up while cruising) & Roll (banking into turns + wave rock)
+                ship.rotation.z = movePitch + Math.sin(elapsed * 2.2 + ph) * wavePitch;
+                ship.rotation.x = turnBank + Math.cos(elapsed * 1.75 + ph) * (wavePitch * 0.82);
+
+                // Speed-reactive Flag flutter & Sail billow
+                const flagFreq = 5.2 + moveBoost * 4.5;
+                const flagAmp = 0.26 + moveBoost * 0.22;
                 if (ship.userData.flag) {
-                    ship.userData.flag.rotation.y = Math.sin(elapsed * 5.2 + shipIdx) * 0.28;
+                    ship.userData.flag.rotation.y = Math.sin(elapsed * flagFreq + ph) * flagAmp;
                 }
                 if (ship.userData.foreFlag) {
-                    ship.userData.foreFlag.rotation.y = Math.cos(elapsed * 5.6 + shipIdx) * 0.25;
+                    ship.userData.foreFlag.rotation.y = Math.cos(elapsed * flagFreq + ph) * (flagAmp * 0.9);
                 }
                 if (ship.userData.mainSail) {
-                    const breath = 1.0 + Math.sin(elapsed * 2.4 + shipIdx) * 0.045;
+                    const breath = 1.0 + moveBoost * 0.14 + Math.sin(elapsed * (2.4 + moveBoost * 2.2) + ph) * (0.04 + moveBoost * 0.03);
                     ship.userData.mainSail.scale.set(breath, 1.0, breath);
                 }
                 if (ship.userData.foreSail) {
-                    const fBreath = 1.0 + Math.cos(elapsed * 2.6 + shipIdx) * 0.04;
+                    const fBreath = 1.0 + moveBoost * 0.12 + Math.cos(elapsed * (2.6 + moveBoost * 2.2) + ph) * (0.035 + moveBoost * 0.025);
                     ship.userData.foreSail.scale.set(fBreath, 1.0, fBreath);
                 }
                 const aftSail = ship.userData.mizzenSail || ship.userData.aftSail;
@@ -2159,30 +3096,93 @@ class World3D {
             });
 
             // 10. Monuments, Ports, Resources & Occupied-Tile Fade Effect
+            // Track camera, ship & hover state so floating labels & LOD only update when needed!
+            const camSig = `${this.camera.position.x.toFixed(1)},${this.camera.position.y.toFixed(1)},${this.camera.position.z.toFixed(1)}`;
+            const shipSig = Array.from(occupiedHexKeys).sort().join("|");
+            const hoverSig = this.hoveredHex ? `${this.hoveredHex.q},${this.hoveredHex.r}` : "";
+            const shouldUpdateLabels = (camSig !== this._lastCamSig) || (shipSig !== this._lastShipSig) || (hoverSig !== this._lastHoverSig) || this._hasActiveLabelFade;
+            this._lastCamSig = camSig;
+            this._lastShipSig = shipSig;
+            this._lastHoverSig = hoverSig;
+            let anyLabelStillFading = false;
+
+            const camDistToTarget = this.camera.position.distanceTo(this.controls.target);
+            const isZoomedOut = camDistToTarget > 62;
+
+            // Dynamic camera-distance scaling for the 6 Region Banners (runs ONLY when camera moves!)
+            if (shouldUpdateLabels && this.regionBannerSprites && this.regionBannerSprites.length > 0) {
+                const camPos = this.camera.position;
+                for (let b = 0; b < this.regionBannerSprites.length; b++) {
+                    const sp = this.regionBannerSprites[b];
+                    const bx = sp.userData.baseScaleX || 5.2;
+                    const by = sp.userData.baseScaleY || 1.30;
+                    const dx = camPos.x - sp.position.x;
+                    const dy = camPos.y - sp.position.y;
+                    const dz = camPos.z - sp.position.z;
+                    const dist = Math.hypot(dx, dy, dz);
+                    const k = Math.max(0.75, Math.min(1.95, dist / 68));
+                    sp.scale.set(bx * k, by * k, 1);
+                }
+            }
+
             const lerpRate = Math.min(1, delta * 9.0);
+            // Shared low-CPU wave pulse variables for all Reef Shoal foam rings & warning buoy blink
+            const reefFoamPulse = Math.sin(elapsed * 2.0);
+            const reefFoamScale1 = 1.0 + reefFoamPulse * 0.06;
+            const reefFoamScale2 = 1.0 - reefFoamPulse * 0.07;
+            const reefLampBlink = 0.25 + (0.5 + 0.5 * Math.sin(elapsed * 2.6)) * 1.15;
+
             for (let i = 0; i < this.hexTiles.length; i++) {
                 const tile = this.hexTiles[i];
+                if (!tile.navigable && !tile.monumentGlowGroup && !tile.labelSprite && !tile.propModel) continue;
                 const isOccupied = occupiedHexKeys.has(`${tile.q},${tile.r}`);
 
                 // A. Fade the tile's baseMesh & rimMesh when occupied by a ship
-                const targetBaseOp = isOccupied ? 0.20 : tile.defaultBaseOpacity;
-                if (Math.abs(tile.baseMesh.material.opacity - targetBaseOp) > 0.008) {
-                    tile.baseMesh.material.opacity += (targetBaseOp - tile.baseMesh.material.opacity) * lerpRate;
+                if (tile.baseMesh && tile.baseMesh.material) {
+                    const targetBaseOp = isOccupied ? 0.20 : tile.defaultBaseOpacity;
+                    if (Math.abs(tile.baseMesh.material.opacity - targetBaseOp) > 0.008) {
+                        tile.baseMesh.material.opacity += (targetBaseOp - tile.baseMesh.material.opacity) * lerpRate;
+                    }
                 }
-                if (tile.rimMesh) {
+                if (tile.rimMesh && tile.rimMesh.material) {
                     const targetRimOp = isOccupied ? 0.04 : tile.defaultRimOpacity;
                     if (Math.abs(tile.rimMesh.material.opacity - targetRimOp) > 0.005) {
                         tile.rimMesh.material.opacity += (targetRimOp - tile.rimMesh.material.opacity) * lerpRate;
                     }
                 }
 
-                // B. Animate & gently fade the tile's 3D propModel when occupied by a ship
+                // B. Animate, hover-boost (+10% scale + brighter emissive rim) & gently fade when occupied by a ship
+                const isHoveredPOI = Boolean(this.hoveredHex === tile && (tile.monumentId || tile.isPort || tile.resourceType || tile.hasNPC));
                 if (tile.propModel) {
-                    const basePropScale = (tile.resourceType && tile.resourceCooldown > 0) ? 0.52 : 1.0;
-                    const targetPropScale = isOccupied ? (basePropScale * 0.72) : basePropScale;
-                    const curScale = tile.propModel.scale.x || 1.0;
-                    if (Math.abs(curScale - targetPropScale) > 0.006) {
-                        tile.propModel.scale.setScalar(curScale + (targetPropScale - curScale) * lerpRate);
+                    const bs = (tile.propModel.userData && tile.propModel.userData.baseScale) || { x: 1.0, y: 1.0, z: 1.0 };
+                    let mult = (tile.resourceType && tile.resourceCooldown > 0) ? 0.55 : 1.0;
+                    if (isOccupied) mult *= 0.72;
+                    else if (isHoveredPOI) mult *= 1.10;
+
+                    const tx = bs.x * mult;
+                    const ty = bs.y * mult;
+                    const tz = bs.z * mult;
+                    if (Math.abs(tile.propModel.scale.x - tx) > 0.006 || Math.abs(tile.propModel.scale.y - ty) > 0.006) {
+                        tile.propModel.scale.set(
+                            tile.propModel.scale.x + (tx - tile.propModel.scale.x) * lerpRate,
+                            tile.propModel.scale.y + (ty - tile.propModel.scale.y) * lerpRate,
+                            tile.propModel.scale.z + (tz - tile.propModel.scale.z) * lerpRate
+                        );
+                    }
+
+                    if (tile.poiEmissiveRim && tile.poiEmissiveRim.material) {
+                        const baseEm = (tile.poiEmissiveRim.userData && tile.poiEmissiveRim.userData.baseEmissiveIntensity) || 0.85;
+                        const targetEm = isHoveredPOI ? 1.65 : (isOccupied ? 0.45 : baseEm);
+                        if (Math.abs((tile.poiEmissiveRim.material.emissiveIntensity || baseEm) - targetEm) > 0.02) {
+                            tile.poiEmissiveRim.material.emissiveIntensity =
+                                (tile.poiEmissiveRim.material.emissiveIntensity || baseEm) +
+                                (targetEm - (tile.poiEmissiveRim.material.emissiveIntensity || baseEm)) * lerpRate;
+                        }
+                        const targetRimSc = isHoveredPOI ? 1.04 : 1.0;
+                        if (Math.abs(tile.poiEmissiveRim.scale.x - targetRimSc) > 0.004) {
+                            const ns = tile.poiEmissiveRim.scale.x + (targetRimSc - tile.poiEmissiveRim.scale.x) * lerpRate;
+                            tile.poiEmissiveRim.scale.set(ns, 1, ns);
+                        }
                     }
 
                     if (tile.propMeshes && tile.propMeshes.length > 0) {
@@ -2201,8 +3201,9 @@ class World3D {
                     if (tile.monumentId) {
                         const crown = tile.propModel.userData.relicCrown;
                         if (crown) {
-                            crown.rotation.y = elapsed * 1.4;
-                            crown.position.y = 2.15 + Math.sin(elapsed * 2.6 + tile.index) * 0.12;
+                            const crownBaseY = tile.propModel.userData.crownBaseY || 2.35;
+                            crown.rotation.y = elapsed * 1.6;
+                            crown.position.y = crownBaseY + Math.sin(elapsed * 2.6 + tile.index) * 0.10;
                         }
                     } else if (tile.isPort) {
                         const crane = tile.propModel.userData.spinY || tile.propModel.userData.craneArm;
@@ -2214,6 +3215,9 @@ class World3D {
                             const s = 0.9 + Math.sin(elapsed * 4.0 + tile.index) * 0.18;
                             lantern.scale.set(s, s, s);
                         }
+                        if (tile.propModel.userData.lhBeamPivot) {
+                            tile.propModel.userData.lhBeamPivot.rotation.y = elapsed * 0.65 + tile.index;
+                        }
                     } else if (tile.resourceType) {
                         const ud = tile.propModel.userData;
                         if (ud.spinZ) {
@@ -2222,10 +3226,33 @@ class World3D {
                         if (ud.spinY) {
                             ud.spinY.rotation.y = elapsed * 1.4;
                         }
+                    } else if (tile.isReef && tile.propModel.userData && tile.propModel.userData.isReefShoal) {
+                        const rud = tile.propModel.userData;
+                        if (rud.foamInner) {
+                            rud.foamInner.scale.set(reefFoamScale1, reefFoamScale1, 1);
+                            rud.foamInner.material.opacity = isOccupied ? 0.18 : (0.55 + reefFoamPulse * 0.14);
+                        }
+                        if (rud.foamOuter) {
+                            rud.foamOuter.scale.set(reefFoamScale2, reefFoamScale2, 1);
+                            rud.foamOuter.material.opacity = isOccupied ? 0.14 : (0.42 - reefFoamPulse * 0.12);
+                        }
+                        if (rud.buoyGroup) {
+                            rud.buoyGroup.position.y = 0.02 + Math.sin(elapsed * 2.3 + rud.phase) * 0.035;
+                            rud.buoyGroup.rotation.z = Math.sin(elapsed * 1.9 + rud.phase) * 0.08;
+                        }
+                        if (rud.lampMat) {
+                            rud.lampMat.emissiveIntensity = reefLampBlink;
+                        }
                     } else if (tile.hasNPC) {
-                        tile.propModel.position.y = (tile.height - 0.1) + Math.sin(elapsed * 3.0) * 0.06;
-                        if (tile.propModel.userData.gem) {
-                            tile.propModel.userData.gem.rotation.y = elapsed * 2.2;
+                        // Gentle wave bobbing + rotating radar + slowly spinning golden emissive ring on FDI Ship
+                        tile.propModel.position.y = (tile.height - 0.1) + Math.sin(elapsed * 2.4) * 0.04;
+                        tile.propModel.rotation.z = Math.sin(elapsed * 1.9) * 0.035;
+                        tile.propModel.rotation.x = Math.cos(elapsed * 1.5) * 0.025;
+                        if (tile.propModel.userData.radarGroup) {
+                            tile.propModel.userData.radarGroup.rotation.y = elapsed * 2.8;
+                        }
+                        if (tile.propModel.userData.ring) {
+                            tile.propModel.userData.ring.rotation.z = elapsed * 0.55;
                         }
                     }
                 }
@@ -2252,15 +3279,76 @@ class World3D {
                         gd.orbitGroup.position.y = 1.35 + Math.sin(elapsed * 2.5 + tile.index) * 0.15;
                     }
                 }
-                if (tile.labelSprite && tile.labelSprite.material) {
-                    const targetLabelOp = isOccupied ? 0.15 : 0.95;
-                    if (Math.abs(tile.labelSprite.material.opacity - targetLabelOp) > 0.01) {
-                        tile.labelSprite.material.opacity += (targetLabelOp - tile.labelSprite.material.opacity) * lerpRate;
+                if (shouldUpdateLabels) {
+                    // Zoom-Level LOD:
+                    // - Zoomed out: Show compact icon (🏛️, ⚓) on Monuments/Ports, hide Resource labels (reveal full label on hover!)
+                    // - Zoomed in: Show full label on Monuments/Ports & icon on Resources
+                    if (tile.monumentId || tile.isPort) {
+                        const showFullLabel = !isZoomedOut || isHoveredPOI;
+                        if (tile.labelSprite && tile.labelSprite.material) {
+                            tile.labelSprite.visible = showFullLabel;
+                            if (showFullLabel) {
+                                const targetOp = isOccupied ? 0.15 : 0.95;
+                                if (Math.abs(tile.labelSprite.material.opacity - targetOp) > 0.01) {
+                                    tile.labelSprite.material.opacity += (targetOp - tile.labelSprite.material.opacity) * lerpRate;
+                                    anyLabelStillFading = true;
+                                }
+                            }
+                        }
+                        if (tile.iconSprite && tile.iconSprite.material) {
+                            tile.iconSprite.visible = !showFullLabel;
+                            if (!showFullLabel) {
+                                const targetIconOp = isOccupied ? 0.25 : 0.95;
+                                if (Math.abs(tile.iconSprite.material.opacity - targetIconOp) > 0.01) {
+                                    tile.iconSprite.material.opacity += (targetIconOp - tile.iconSprite.material.opacity) * lerpRate;
+                                    anyLabelStillFading = true;
+                                }
+                            }
+                        }
+                    } else if (tile.resourceType) {
+                        if (tile.labelSprite && tile.labelSprite.material) {
+                            const showResIcon = !isZoomedOut || isHoveredPOI;
+                            tile.labelSprite.visible = showResIcon;
+                            if (showResIcon) {
+                                const targetOp = isOccupied ? 0.18 : 0.92;
+                                if (Math.abs(tile.labelSprite.material.opacity - targetOp) > 0.01) {
+                                    tile.labelSprite.material.opacity += (targetOp - tile.labelSprite.material.opacity) * lerpRate;
+                                    anyLabelStillFading = true;
+                                }
+                            }
+                        }
+                    } else if (tile.labelSprite && tile.labelSprite.material) {
+                        const targetLabelOp = isOccupied ? 0.15 : 0.95;
+                        if (Math.abs(tile.labelSprite.material.opacity - targetLabelOp) > 0.01) {
+                            tile.labelSprite.material.opacity += (targetLabelOp - tile.labelSprite.material.opacity) * lerpRate;
+                            anyLabelStillFading = true;
+                        }
                     }
                 }
             }
+            this._hasActiveLabelFade = anyLabelStillFading;
 
-            // 11. Wake, Burst, Lightning Bolt & Monument Trap Effects
+            // 11. Object-Pooled V-Shaped Ship Wake Foam Update (Zero Mesh Alloc/Remove!)
+            if (this.wakePool) {
+                for (let w = 0; w < this.wakePool.length; w++) {
+                    const wp = this.wakePool[w];
+                    if (!wp.active) continue;
+                    const age = now - wp.birth;
+                    if (age >= wp.life) {
+                        wp.active = false;
+                        wp.mesh.visible = false;
+                        continue;
+                    }
+                    const prog = age / wp.life;
+                    wp.mesh.position.x += wp.vx * delta;
+                    wp.mesh.position.z += wp.vz * delta;
+                    const s = wp.initScale * (1.0 + prog * 1.9);
+                    wp.mesh.scale.set(s, 1, s);
+                    wp.mat.opacity = (1.0 - prog) * 0.72;
+                }
+            }
+
+            // 11b. Burst, Lightning Bolt & Monument Trap Effects
             for (let i = this.floatingEffects.length - 1; i >= 0; i--) {
                 const fx = this.floatingEffects[i];
                 const age = now - fx.birth;
