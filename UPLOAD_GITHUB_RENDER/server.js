@@ -147,6 +147,76 @@ const MIME_TYPES = {
 };
 
 const rooms = new Map();
+const roomChatStreams = new Map(); // roomCode -> Set<http.ServerResponse>
+const chatRateLimitMap = new Map(); // clientId -> lastSentTimestampMs
+const MAX_CHAT_HISTORY = 60;
+const MAX_CHAT_LEN = 250;
+const CHAT_RATE_LIMIT_MS = 250;
+const CHAT_MAX_CONSECUTIVE = 4;
+const CHAT_SPAM_COOLDOWN_MS = 10000;
+
+function formatChatHHMM(d = new Date()) {
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `${hh}:${mm}`;
+}
+
+function broadcastRoomChatEvent(code, eventName, payload) {
+    const subs = roomChatStreams.get(code);
+    if (!subs || subs.size === 0) return;
+    const frame = `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
+    subs.forEach((clientRes) => {
+        try {
+            if (!clientRes.writableEnded) {
+                clientRes.write(frame);
+            } else {
+                subs.delete(clientRes);
+            }
+        } catch (e) {
+            subs.delete(clientRes);
+        }
+    });
+}
+
+function cleanupRoomChatStreams(code) {
+    const subs = roomChatStreams.get(code);
+    if (!subs) return;
+    subs.forEach((clientRes) => {
+        try {
+            if (!clientRes.writableEnded) clientRes.end();
+        } catch (e) {}
+    });
+    roomChatStreams.delete(code);
+}
+
+function appendRoomChatMessage(room, msgObj) {
+    if (!room) return null;
+    if (!Array.isArray(room.chatHistory)) room.chatHistory = [];
+    room.chatHistory.push(msgObj);
+    if (room.chatHistory.length > MAX_CHAT_HISTORY) {
+        room.chatHistory = room.chatHistory.slice(-MAX_CHAT_HISTORY);
+    }
+    room.chatVersion = (room.chatVersion || 0) + 1;
+    broadcastRoomChatEvent(room.code, "room_chat_message", msgObj);
+    return msgObj;
+}
+
+function pushSystemChatMessage(room, text) {
+    if (!room || !text) return null;
+    const now = new Date();
+    return appendRoomChatMessage(room, {
+        id: `sys_${now.getTime()}_${Math.random().toString(36).slice(2, 6)}`,
+        roomCode: room.code,
+        senderId: "system",
+        senderName: "Hệ thống",
+        senderColor: "#9CC4D4",
+        isHost: false,
+        isSystem: true,
+        message: String(text).trim().slice(0, MAX_CHAT_LEN),
+        timeStr: formatChatHHMM(now),
+        timestamp: now.getTime()
+    });
+}
 
 function loadRoomsFromDisk() {
     try {
@@ -196,11 +266,11 @@ function normalizeCode(raw) {
 }
 
 const DEFAULT_ARCHETYPES = [
-    { name: "Hải Đội Hồng Hà", vesselTitle: "Chiến Thuyền Lưỡng Long (Đỏ Thẫm)", color: "#ff2424" },
-    { name: "Hải Đội Hạ Long", vesselTitle: "Thương Thuyền Ngọc Lục Bảo (Xanh Lá)", color: "#00e676" },
-    { name: "Hải Đội Trường Sơn", vesselTitle: "Hải Thuyền Đại Dương (Xanh Lam)", color: "#00b0ff" },
-    { name: "Hải Đội Cửu Long", vesselTitle: "Ghe Ngo Hoàng Kim (Vàng Rực)", color: "#ffea00" },
-    { name: "Hải Đội Sài Gòn", vesselTitle: "Viễn Dương Hạm Tím Hoàng Gia", color: "#e040fb" }
+    { name: "Hải Đội Hồng Hà", vesselTitle: "Tàu Bạch Đằng", color: "#ff2424" },
+    { name: "Hải Đội Hạ Long", vesselTitle: "Tàu Vịnh Hạ Long", color: "#00e676" },
+    { name: "Hải Đội Trường Sơn", vesselTitle: "Tàu Tiên Sa", color: "#00b0ff" },
+    { name: "Hải Đội Cửu Long", vesselTitle: "Tàu Tây Đô", color: "#ffea00" },
+    { name: "Hải Đội Sài Gòn", vesselTitle: "Tàu Viễn Hải Sài Gòn", color: "#e040fb" }
 ];
 
 function parseBody(req) {
@@ -557,8 +627,11 @@ http.createServer(async (req, res) => {
             gameState: null,
             clientLastSeen: { [clientId]: now },
             takeoverEvents: [],
+            chatHistory: [],
+            chatVersion: 0,
             updatedAt: now
         };
+        pushSystemChatMessage(room, `⛵ ${hostName} đã tạo phòng.`);
         rooms.set(code, room);
         saveRoomsToDisk();
         return sendJSON(res, 200, { ok: true, room, assignedSeat: 0, clientId });
@@ -665,6 +738,7 @@ http.createServer(async (req, res) => {
         targetSeat.isHost = false;
         targetSeat.joinedAt = Date.now();
         touchClientActivity(room, clientId);
+        pushSystemChatMessage(room, `⛵ ${targetSeat.name} đã tham gia phòng.`);
 
         room.version++;
         room.updatedAt = Date.now();
@@ -718,9 +792,11 @@ http.createServer(async (req, res) => {
         if (room) {
             const seat = room.seats.find(s => s.clientId === clientId || s.originalClientId === clientId);
             if (seat) {
+                const leavingName = seat.originalName || seat.name || "Thuyền Trưởng";
                 if (room.status === "playing" && room.gameState) {
                     // Do NOT delete the ship! Convert player to Bot Takeover & transfer Host to earliest remaining real player!
                     takeoverPlayerByBot(room, seat, "rời phòng ngang");
+                    pushSystemChatMessage(room, `🤖 ${leavingName} đã rời trận — Tàu Máy tạm tiếp quản.`);
                     saveRoomsToDisk();
                     return sendJSON(res, 200, { ok: true, botTakenOver: true });
                 }
@@ -744,10 +820,13 @@ http.createServer(async (req, res) => {
 
                 if (remainingHumans.length === 0) {
                     // All human players have left -> Automatically close/delete the room!
+                    cleanupRoomChatStreams(code);
                     rooms.delete(code);
                     saveRoomsToDisk();
                     return sendJSON(res, 200, { ok: true, roomClosed: true });
                 }
+
+                pushSystemChatMessage(room, `👋 ${leavingName || "Thuyền Trưởng"} đã rời phòng.`);
 
                 // If the host left, transfer Host role to the person who joined earliest after the host!
                 if (wasHost || !room.seats.some(s => s.isHost)) {
@@ -768,6 +847,7 @@ http.createServer(async (req, res) => {
         const code = normalizeCode(body.code);
         const room = rooms.get(code);
         if (room) {
+            cleanupRoomChatStreams(code);
             rooms.delete(code);
             saveRoomsToDisk();
         }
@@ -826,6 +906,7 @@ http.createServer(async (req, res) => {
             room.openingQuiz = null;
             room.openingAnswers = {};
             initAllHumanLastSeen(room);
+            pushSystemChatMessage(room, "🚀 Trận đấu bắt đầu!");
             room.version++;
             room.updatedAt = Date.now();
             saveRoomsToDisk();
@@ -835,6 +916,7 @@ http.createServer(async (req, res) => {
         room.status = "turn_order_quiz";
         room.gameState = body.gameState || null;
         initAllHumanLastSeen(room);
+        pushSystemChatMessage(room, "🚀 Trận đấu bắt đầu!");
         const nowMs = Date.now();
         room.openingQuiz = {
             quiz: quizObj,
@@ -1037,6 +1119,8 @@ http.createServer(async (req, res) => {
                     if (typeof up.secretPoints === "number") target.secretPoints = Math.max(target.secretPoints || 0, up.secretPoints);
                     if (typeof up.prosperityPoints === "number") target.prosperityPoints = Math.max(target.prosperityPoints || 0, up.prosperityPoints);
                     if (typeof up.publicPoints === "number") target.publicPoints = Math.max(target.publicPoints || 0, up.publicPoints);
+                    if (typeof up.afkBotTakeover === "boolean") target.afkBotTakeover = up.afkBotTakeover;
+                    if (typeof up.isAI === "boolean") target.isAI = up.isAI;
                 }
             });
         }
@@ -1044,6 +1128,136 @@ http.createServer(async (req, res) => {
         room.updatedAt = Date.now();
         saveRoomsToDisk();
         return sendJSON(res, 200, { ok: true, version: room.version, gameState: room.gameState });
+    }
+
+    // 9D. REAL-TIME ROOM CHAT STREAM (SSE — room_chat_history & room_chat_message)
+    if (urlPath === "/api/room/chat/stream" && req.method === "GET") {
+        const code = normalizeCode(parsedUrl.searchParams.get("code"));
+        const room = rooms.get(code);
+        if (!room) {
+            res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: false, roomClosed: true }));
+            return;
+        }
+        res.writeHead(200, {
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        });
+        if (!roomChatStreams.has(code)) {
+            roomChatStreams.set(code, new Set());
+        }
+        const subs = roomChatStreams.get(code);
+        subs.add(res);
+
+        // Send initial room chat history (max 60 messages) immediately
+        const history = Array.isArray(room.chatHistory) ? room.chatHistory.slice(-MAX_CHAT_HISTORY) : [];
+        res.write(`event: room_chat_history\ndata: ${JSON.stringify(history)}\n\n`);
+
+        const keepAlive = setInterval(() => {
+            try {
+                if (!res.writableEnded) res.write(": ping\n\n");
+            } catch (e) {
+                clearInterval(keepAlive);
+            }
+        }, 25000);
+
+        req.on("close", () => {
+            clearInterval(keepAlive);
+            subs.delete(res);
+            if (subs.size === 0) roomChatStreams.delete(code);
+        });
+        return;
+    }
+
+    // 9E. SEND ROOM CHAT MESSAGE (room_chat_send -> broadcast room_chat_message)
+    if (urlPath === "/api/room/chat/send" && req.method === "POST") {
+        const body = await parseBody(req);
+        const code = normalizeCode(body.roomCode || body.code);
+        const room = rooms.get(code);
+        if (!room) {
+            return sendJSON(res, 404, { ok: false, roomClosed: true, error: "Phòng không tồn tại hoặc đã đóng." });
+        }
+        const clientId = String(body.clientId || "anon").trim();
+        const nowMs = Date.now();
+        if (!room.chatSpamState) {
+            room.chatSpamState = { lastSenderId: null, consecutiveCount: 0, lastMsgAt: 0, cooldownByClient: {} };
+        }
+        const spamState = room.chatSpamState;
+        const cooldownUntil = (spamState.cooldownByClient && spamState.cooldownByClient[clientId]) || 0;
+        if (cooldownUntil > nowMs) {
+            const remainingSec = Math.max(1, Math.ceil((cooldownUntil - nowMs) / 1000));
+            return sendJSON(res, 429, {
+                ok: false,
+                spamCooldown: true,
+                remainingSec,
+                cooldownUntil,
+                error: `Bạn nhắn quá nhanh (tối đa ${CHAT_MAX_CONSECUTIVE} tin liên tiếp) — Vui lòng chờ ${remainingSec}s`
+            });
+        }
+
+        const lastSent = chatRateLimitMap.get(clientId) || 0;
+        if (nowMs - lastSent < CHAT_RATE_LIMIT_MS) {
+            return sendJSON(res, 429, { ok: false, rateLimited: true, error: "Bạn đang nhắn quá nhanh, đợi chút nhé!" });
+        }
+
+        const cleanMsg = String(body.message || "").trim().slice(0, MAX_CHAT_LEN);
+        if (!cleanMsg) {
+            return sendJSON(res, 400, { ok: false, error: "Tin nhắn trống." });
+        }
+
+        // Anti-spam: reset consecutive counter if another player spoke OR player paused > 10s
+        if (spamState.lastSenderId !== clientId || (nowMs - (spamState.lastMsgAt || 0)) > CHAT_SPAM_COOLDOWN_MS) {
+            spamState.consecutiveCount = 0;
+        }
+        if (spamState.consecutiveCount >= CHAT_MAX_CONSECUTIVE) {
+            const until = nowMs + CHAT_SPAM_COOLDOWN_MS;
+            spamState.cooldownByClient[clientId] = until;
+            spamState.consecutiveCount = 0;
+            return sendJSON(res, 429, {
+                ok: false,
+                spamCooldown: true,
+                remainingSec: Math.ceil(CHAT_SPAM_COOLDOWN_MS / 1000),
+                cooldownUntil: until,
+                error: `Bạn nhắn quá nhanh (tối đa ${CHAT_MAX_CONSECUTIVE} tin liên tiếp) — Vui lòng chờ 10s`
+            });
+        }
+
+        spamState.lastSenderId = clientId;
+        spamState.consecutiveCount += 1;
+        spamState.lastMsgAt = nowMs;
+        chatRateLimitMap.set(clientId, nowMs);
+        touchClientActivity(room, clientId);
+
+        const matchedSeat = (room.seats || []).find(s => s.clientId === clientId || s.originalClientId === clientId);
+        const matchedPlayer = (room.gameState && Array.isArray(room.gameState.players))
+            ? room.gameState.players.find(p => p.clientId === clientId || (matchedSeat && p.seatIndex === matchedSeat.seatIndex))
+            : null;
+        const senderName = (matchedPlayer && matchedPlayer.name)
+            || (matchedSeat && matchedSeat.name)
+            || String(body.senderName || "Thuyền Trưởng").trim().slice(0, 32);
+        const senderColor = (matchedPlayer && matchedPlayer.color)
+            || (matchedSeat && matchedSeat.color)
+            || "#F2C96B";
+        const isHost = Boolean((matchedSeat && matchedSeat.isHost) || (room.hostClientId && room.hostClientId === clientId));
+
+        const msgObj = appendRoomChatMessage(room, {
+            id: `msg_${nowMs}_${Math.random().toString(36).slice(2, 7)}`,
+            roomCode: room.code,
+            senderId: clientId,
+            senderName,
+            senderColor,
+            isHost,
+            isSystem: false,
+            message: cleanMsg,
+            timeStr: formatChatHHMM(new Date(nowMs)),
+            timestamp: nowMs
+        });
+
+        room.updatedAt = nowMs;
+        saveRoomsToDisk();
+        return sendJSON(res, 200, { ok: true, message: msgObj });
     }
 
     // 9C. RETURN ROOM TO WAITING LOBBY AFTER VICTORY CELEBRATION (15S)

@@ -1289,12 +1289,22 @@ window.GAME_DATA = {
         }
     ],
 
+    // REGIONAL VESSEL NAMES (Matched to Charter Economic Region & Home Port — No "Ghe", No Duplicates)
+    regionVesselNames: {
+        0: ["Tàu Than Cái Lân", "Tàu Vịnh Hạ Long", "Tàu Hải Trình Vân Đồn"],
+        1: ["Tàu Bạch Đằng", "Tàu Cảng Hải Phòng", "Tàu Viễn Dương Hồng Hà"],
+        2: ["Tàu Tiên Sa", "Tàu Sông Hàn", "Tàu Nghinh Phong Miền Trung"],
+        3: ["Tàu Thị Nại", "Tàu Hàng Quy Nhơn", "Tàu Cao Nguyên Hướng Biển"],
+        4: ["Tàu Hàng Cái Mép", "Tàu Cửa Thị Vải", "Tàu Viễn Hải Sài Gòn"],
+        5: ["Tàu Tây Đô", "Tàu Hậu Giang", "Tàu Phương Nam Cửu Long"]
+    },
+
     // 5 DISTINCT SHIP ARCHETYPES (Ultra-Clear High-Contrast Fleet Colors for Easy Identification)
     shipArchetypes: [
         {
             id: 0,
             name: "Hải Đội Hồng Hà",
-            vesselTitle: "Chiến Thuyền Lưỡng Long (Đỏ Rực)",
+            vesselTitle: "Tàu Bạch Đằng",
             color: "#ff2424", // Vivid Crimson Red
             sailColor: "#ff5252",
             trimColor: "#ffd700",
@@ -1304,7 +1314,7 @@ window.GAME_DATA = {
         {
             id: 1,
             name: "Hải Đội Hạ Long",
-            vesselTitle: "Thương Thuyền Ngọc Lục Bảo (Xanh Lá)",
+            vesselTitle: "Tàu Vịnh Hạ Long",
             color: "#00e676", // Vivid Emerald Green
             sailColor: "#69f0ae",
             trimColor: "#ffd700",
@@ -1314,7 +1324,7 @@ window.GAME_DATA = {
         {
             id: 2,
             name: "Hải Đội Trường Sơn",
-            vesselTitle: "Hải Thuyền Đại Dương (Xanh Lam Sáng)",
+            vesselTitle: "Tàu Tiên Sa",
             color: "#00b0ff", // Electric Sky Cyan-Blue
             sailColor: "#40c4ff",
             trimColor: "#ffffff",
@@ -1324,17 +1334,17 @@ window.GAME_DATA = {
         {
             id: 3,
             name: "Hải Đội Cửu Long",
-            vesselTitle: "Ghe Ngo Hoàng Kim (Vàng Kim)",
+            vesselTitle: "Tàu Tây Đô",
             color: "#ffea00", // Sunburst Golden Yellow
             sailColor: "#ffee58",
             trimColor: "#ff6d00",
             style: "golden_galley",
-            desc: "Thuyền hoàng kim rực rỡ, linh hoạt luồn lách qua mọi vùng biển Nam Bộ."
+            desc: "Tàu hoàng kim rực rỡ, linh hoạt luồn lách qua mọi vùng biển Nam Bộ."
         },
         {
             id: 4,
             name: "Hải Đội Sài Gòn",
-            vesselTitle: "Viễn Dương Hạm Tím Huế (Tím Hồng)",
+            vesselTitle: "Tàu Viễn Hải Sài Gòn",
             color: "#e040fb", // Vivid Royal Magenta-Purple
             sailColor: "#ea80fc",
             trimColor: "#ffd700",

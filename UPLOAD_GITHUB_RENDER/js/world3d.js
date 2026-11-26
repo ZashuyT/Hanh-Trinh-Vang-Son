@@ -31,6 +31,21 @@ class World3D {
         this.graphicsQuality = "pretty"; // 'pretty' ("✨ Đẹp (Tối ưu)") | 'smooth' ("⚡ Siêu Mượt")
         this.cameraLockEnabled = false;
         this.cameraLockShipKey = null;
+        this.menuOrbitMode = false;
+        this.menuOrbitAngle = 0.28;
+        this.lobbyMouseX = 0;
+        this.lobbyMouseY = 0;
+        this.lobbyParallaxX = 0;
+        this.lobbyParallaxY = 0;
+        this.lobbyScene = null;
+        this.lobbyCamera = null;
+        this.lobbyWaveMesh = null;
+        this.lobbyWaveBaseXZ = null;
+        this.lobbyWaveSmooth = false;
+        this.lobbyBeaconPivot = null;
+        this.lobbyShips = [];
+        this.lobbyClouds = [];
+        this.lobbyGulls = [];
         this.weatherMode = "sunny";
         this._frameCount = 0;
         this._lastCamSig = "";
@@ -46,6 +61,7 @@ class World3D {
         this.initScene();
         this.initAtmosphereAndWeather();
         this.initOcean();
+        this.initLobbySunsetScene();
         this.initEvents();
     }
 
@@ -61,14 +77,14 @@ class World3D {
         if (this.graphicsQuality === "smooth") return 1;
         const ua = (typeof navigator !== "undefined" && navigator.userAgent) ? navigator.userAgent : "";
         const isMobile = /Android|iPhone|iPad|iPod|Mobi/i.test(ua) || (typeof window !== "undefined" && window.innerWidth <= 900);
-        const cap = isMobile ? 1.25 : 1.5;
+        const cap = isMobile ? 1.5 : 2;
         return Math.min((typeof window !== "undefined" && window.devicePixelRatio) || 1, cap);
     }
 
     initScene() {
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0x38bdf8);
-        this.scene.fog = new THREE.Fog(0xbae6fd, 210, 480);
+        this.scene.fog = new THREE.Fog(0xbae6fd, 280, 680);
 
         const w = this.container.clientWidth || window.innerWidth;
         const h = this.container.clientHeight || window.innerHeight;
@@ -86,6 +102,12 @@ class World3D {
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
         this.renderer.toneMappingExposure = 1.08;
+        this.maxAnisotropy = (this.renderer.capabilities && typeof this.renderer.capabilities.getMaxAnisotropy === "function")
+            ? Math.min(this.renderer.capabilities.getMaxAnisotropy(), 8)
+            : 1;
+        if (typeof ProceduralModels !== "undefined") {
+            ProceduralModels.MAX_ANISOTROPY = this.maxAnisotropy;
+        }
         this.container.innerHTML = "";
         this.container.appendChild(this.renderer.domElement);
 
@@ -113,8 +135,8 @@ class World3D {
         this._baseSunIntensity = 1.45;
         this.sunLight.position.set(62, 72, -72);
         this.sunLight.castShadow = true;
-        this.sunLight.shadow.mapSize.width = 1024;
-        this.sunLight.shadow.mapSize.height = 1024;
+        this.sunLight.shadow.mapSize.width = 2048;
+        this.sunLight.shadow.mapSize.height = 2048;
         this.sunLight.shadow.camera.near = 20;
         this.sunLight.shadow.camera.far = 210;
         this.sunLight.shadow.camera.left = -58;
@@ -129,6 +151,21 @@ class World3D {
 
         this.pathPreviewGroup = new THREE.Group();
         this.scene.add(this.pathPreviewGroup);
+        this.pathPreviewAnimItems = null;
+        this.getPathPreviewMeta = null;
+        this.isPathLocked = false;
+        this.onCancelLockedPath = null;
+
+        // Crisp 2D HTML Projected Map Labels Engine (#map-labels-layer)
+        this.htmlLabels = new Map();
+        this.htmlLabelLayer = (typeof document !== "undefined") ? document.getElementById("map-labels-layer") : null;
+        this._projVec = new THREE.Vector3();
+        this._lastHoveredHtmlId = null;
+        this.htmlLabelMode = "compact"; // "compact" | "full" | "hidden"
+        if (this.htmlLabelLayer) {
+            this.htmlLabelLayer.classList.remove("labels-compact", "labels-full", "labels-hidden");
+            this.htmlLabelLayer.classList.add("labels-compact");
+        }
 
         this.effectsGroup = new THREE.Group();
         this.scene.add(this.effectsGroup);
@@ -412,8 +449,11 @@ class World3D {
             this.cloudInstancedMesh.visible = !isSmooth && this.cloudsVisible;
         }
 
-        // 3. Wildlife (birds, fish, dolphins, sampans, foam)
+        // 3. Wildlife (birds, fish, dolphins, sampans, foam) & Lobby Sunset Wave Density
         this.applyMinimalistMode();
+        if (this.lobbyScene && typeof this.buildLobbyWaveMesh === "function") {
+            this.buildLobbyWaveMesh(isSmooth);
+        }
         return this.graphicsQuality;
     }
 
@@ -451,6 +491,691 @@ class World3D {
         if (player) {
             this.cameraLockShipKey = World3D.getPlayerShipKey(player);
         }
+    }
+
+    setMenuOrbitMode(enabled) {
+        this.menuOrbitMode = Boolean(enabled);
+        if (this.controls) {
+            this.controls.enabled = !this.menuOrbitMode;
+        }
+        const labelsLayer = document.getElementById("map-labels-layer");
+        if (labelsLayer) {
+            labelsLayer.classList.toggle("hidden", this.menuOrbitMode);
+        }
+        if (this.menuOrbitMode && !this.lobbyScene && typeof this.initLobbySunsetScene === "function") {
+            this.initLobbySunsetScene();
+        }
+    }
+
+    // ========================================================================
+    // GOLDEN SUNSET LOW-POLY 3D LOBBY DIORAMA (SHARED SINGLE WebGLRenderer)
+    // ========================================================================
+    getLobbyWaveY(x, z, t) {
+        return (
+            Math.sin(x * 0.15 + t * 1.25) * 0.40 +
+            Math.cos(z * 0.18 - t * 1.02) * 0.34 +
+            Math.sin((x * 0.8 - z * 0.6) * 0.13 + t * 0.90) * 0.22 +
+            Math.cos((x + z) * 0.24 - t * 1.48) * 0.10
+        );
+    }
+
+    createLobbyGlowTexture(innerRgba, midRgba) {
+        if (typeof document === "undefined" || typeof document.createElement !== "function") return null;
+        const canvas = document.createElement("canvas");
+        if (!canvas || typeof canvas.getContext !== "function") return null;
+        canvas.width = 128;
+        canvas.height = 128;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return null;
+        const grad = ctx.createRadialGradient(64, 64, 2, 64, 64, 62);
+        grad.addColorStop(0, innerRgba);
+        grad.addColorStop(0.4, midRgba);
+        grad.addColorStop(1, "rgba(255, 210, 110, 0)");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, 128, 128);
+        return new THREE.CanvasTexture(canvas);
+    }
+
+    buildLobbyWaveMesh(isSmooth = false) {
+        if (!this.lobbyScene) return;
+        if (this.lobbyWaveMesh && this.lobbyWaveSmooth === Boolean(isSmooth)) return;
+        if (this.lobbyWaveMesh) {
+            this.lobbyScene.remove(this.lobbyWaveMesh);
+            if (this.lobbyWaveMesh.geometry && this.lobbyWaveMesh.geometry.dispose) {
+                this.lobbyWaveMesh.geometry.dispose();
+            }
+        }
+        this.lobbyWaveSmooth = Boolean(isSmooth);
+        const segX = isSmooth ? 24 : 48;
+        const segZ = isSmooth ? 18 : 36;
+        const geo = new THREE.PlaneGeometry(184, 134, segX, segZ);
+        geo.rotateX(-Math.PI / 2);
+
+        const pos = geo.attributes && geo.attributes.position;
+        if (pos && pos.count) {
+            const count = pos.count;
+            this.lobbyWaveBaseXZ = new Float32Array(count * 2);
+            const colors = new Float32Array(count * 3);
+            // Deep matte ocean teal #114f60 -> Warm amber-gold sunset sheen #dfb056
+            const r0 = 0x11 / 255, g0 = 0x4f / 255, b0 = 0x60 / 255;
+            const r1 = 0xdf / 255, g1 = 0xb0 / 255, b1 = 0x56 / 255;
+
+            for (let i = 0; i < count; i++) {
+                const vx = pos.getX(i);
+                const vz = pos.getZ(i);
+                this.lobbyWaveBaseXZ[i * 2] = vx;
+                this.lobbyWaveBaseXZ[i * 2 + 1] = vz;
+                // Soft golden sunset reflection path shimmering toward horizon
+                const distFromSunPath = Math.abs(vx - 1.8 - vz * 0.05);
+                const sunFactor = Math.max(0, 1 - distFromSunPath / 18) * (vz < 16 ? 0.54 : 0.24);
+                colors[i * 3] = r0 + (r1 - r0) * sunFactor;
+                colors[i * 3 + 1] = g0 + (g1 - g0) * sunFactor;
+                colors[i * 3 + 2] = b0 + (b1 - b0) * sunFactor;
+            }
+            if (typeof THREE.BufferAttribute === "function") {
+                geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+            }
+        }
+
+        const mat = new THREE.MeshLambertMaterial({
+            color: 0xffffff,
+            vertexColors: true,
+            flatShading: true
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(0, 0, -24);
+        this.lobbyScene.add(mesh);
+        this.lobbyWaveMesh = mesh;
+    }
+
+    initLobbySunsetScene() {
+        try {
+            if (typeof THREE === "undefined" || !THREE.Scene || !THREE.PerspectiveCamera) return;
+            const w = (this.container && this.container.clientWidth) || (typeof window !== "undefined" ? window.innerWidth : 1280);
+            const h = (this.container && this.container.clientHeight) || (typeof window !== "undefined" ? window.innerHeight : 720);
+
+            this.lobbyScene = new THREE.Scene();
+            this.lobbyScene.background = new THREE.Color(0x162e42);
+            if (typeof THREE.FogExp2 === "function") {
+                this.lobbyScene.fog = new THREE.FogExp2(0xa37c46, 0.0086);
+            }
+
+            this.lobbyCamera = new THREE.PerspectiveCamera(46, w / Math.max(1, h), 0.5, 420);
+            this.lobbyCamera.position.set(0, 7.6, 30.5);
+            if (typeof this.lobbyCamera.lookAt === "function") {
+                this.lobbyCamera.lookAt(0.5, 4.4, -22);
+            }
+
+            // 1. Sunset Sky Dome (Deep Navy #0e2236 -> Antique Gold #d9a441 -> Warm Horizon #f4c86a)
+            let skyTex = null;
+            if (typeof document !== "undefined" && typeof document.createElement === "function") {
+                const skyCanvas = document.createElement("canvas");
+                if (skyCanvas && typeof skyCanvas.getContext === "function") {
+                    skyCanvas.width = 64;
+                    skyCanvas.height = 512;
+                    const sctx = skyCanvas.getContext("2d");
+                    if (sctx) {
+                        const g = sctx.createLinearGradient(0, 0, 0, 512);
+                        g.addColorStop(0.00, "#0b1c2d");
+                        g.addColorStop(0.28, "#142b3b");
+                        g.addColorStop(0.46, "#454c52");
+                        g.addColorStop(0.56, "#b98a3b");
+                        g.addColorStop(0.64, "#e8b959");
+                        g.addColorStop(0.72, "#f4c86a");
+                        g.addColorStop(1.00, "#145e6e");
+                        sctx.fillStyle = g;
+                        sctx.fillRect(0, 0, 64, 512);
+                        skyTex = new THREE.CanvasTexture(skyCanvas);
+                    }
+                }
+            }
+            const skyDome = new THREE.Mesh(
+                new THREE.SphereGeometry(210, 20, 12),
+                new THREE.MeshBasicMaterial({
+                    map: skyTex || undefined,
+                    color: skyTex ? 0xffffff : 0x1e3c52,
+                    side: THREE.BackSide,
+                    fog: false,
+                    depthWrite: false
+                })
+            );
+            this.lobbyScene.add(skyDome);
+
+            // Glowing Sunset Sun Disk + Soft Halo (low slightly right of center)
+            const sunDisk = new THREE.Mesh(
+                new THREE.CircleGeometry(9.5, 24),
+                new THREE.MeshBasicMaterial({ color: 0xffe49e, fog: false, depthWrite: false })
+            );
+            sunDisk.position.set(4.5, 11.5, -135);
+            this.lobbyScene.add(sunDisk);
+
+            const sunGlowTex = this.createLobbyGlowTexture("rgba(255, 236, 168, 0.92)", "rgba(244, 192, 92, 0.42)");
+            if (sunGlowTex && typeof THREE.Sprite === "function") {
+                const sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({
+                    map: sunGlowTex,
+                    color: 0xffd97d,
+                    transparent: true,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false,
+                    fog: false
+                }));
+                sunGlow.position.set(4.5, 11.5, -134);
+                sunGlow.scale.set(56, 56, 1);
+                this.lobbyScene.add(sunGlow);
+            }
+
+            // 2. Golden Sunset Lights (Zero PointLight!)
+            const hemi = new THREE.HemisphereLight(0x285678, 0xd9a441, 1.05);
+            this.lobbyScene.add(hemi);
+
+            const sunDir = new THREE.DirectionalLight(0xffcf70, 1.48);
+            sunDir.position.set(10, 16, -68);
+            this.lobbyScene.add(sunDir);
+
+            const fillDir = new THREE.DirectionalLight(0x5293a8, 0.36);
+            fillDir.position.set(-28, 18, 28);
+            this.lobbyScene.add(fillDir);
+
+            // 3. Animated Faceted Low-Poly Waves
+            this.buildLobbyWaveMesh(this.graphicsQuality === "smooth");
+
+            // Shared Matte Natural Flat-Shaded Low-Poly Materials (Low emissive 0.03-0.06 — Zero Plastic Sheen!)
+            const flatMat = (hex, extra = {}) => new THREE.MeshLambertMaterial({
+                color: hex,
+                emissive: hex,
+                emissiveIntensity: 0.04,
+                flatShading: true,
+                ...extra
+            });
+            const rockMat = flatMat(0x58656b);
+            const rockDarkMat = flatMat(0x414d54);
+            const rockWarmMat = flatMat(0x6b675e);
+            const mossMat = flatMat(0x3a6f31);
+            const hillMat = flatMat(0x3f7330);
+            const hillDarkMat = flatMat(0x2a5324);
+            const cliffBrownMat = flatMat(0x5c4734);
+            const terraceMats = [flatMat(0x4b7f30), flatMat(0x638d34), flatMat(0x829b38), flatMat(0xa6a540), flatMat(0xc4a448)];
+            const redWoodMat = flatMat(0x8c2322);
+            const roofRedMat = flatMat(0xa42b28);
+            const goldTrimMat = flatMat(0xd4a23e, { emissiveIntensity: 0.08 });
+            const lhWhiteMat = flatMat(0xe8dec8);
+            const lhRedMat = flatMat(0xb33328);
+
+            // 4A. Left & Background Ha Long Karst Limestone Islands (Sculpted Multi-Crag Clusters — No Single Cylinders!)
+            const karstSpecs = [
+                { x: -34, z: -18, r: 5.2, h: 12.2, rot: 0.4 },
+                { x: -24, z: -26, r: 3.8, h: 8.0, rot: 1.2 },
+                { x: -17, z: -34, r: 5.0, h: 13.6, rot: 2.1 },
+                { x: -21.5, z: -40, r: 3.0, h: 6.6, rot: 0.9 },
+                { x: -7.5, z: -42, r: 3.4, h: 9.2, rot: 1.7 },
+                { x: -39, z: -34, r: 5.8, h: 10.8, rot: 2.8 }
+            ];
+            karstSpecs.forEach((ks, idx) => {
+                const g = new THREE.Group();
+                // Multi-tiered jagged karst base & spires
+                const baseCrag = new THREE.Mesh(new THREE.DodecahedronGeometry(ks.r * 0.95, 0), rockDarkMat);
+                baseCrag.scale.set(1.22, 0.56, 1.05);
+                baseCrag.position.y = ks.r * 0.28;
+                g.add(baseCrag);
+
+                const mainPeak = new THREE.Mesh(
+                    new THREE.ConeGeometry(ks.r * 0.78, ks.h, 6),
+                    idx % 2 === 0 ? rockMat : rockWarmMat
+                );
+                mainPeak.scale.set(0.95, 1.0, 0.82);
+                mainPeak.position.set(0, ks.h * 0.48, 0);
+                mainPeak.rotation.y = ks.rot;
+                g.add(mainPeak);
+
+                const sidePeak1 = new THREE.Mesh(new THREE.ConeGeometry(ks.r * 0.54, ks.h * 0.68, 5), rockDarkMat);
+                sidePeak1.position.set(ks.r * 0.54, ks.h * 0.30, 0.45);
+                sidePeak1.rotation.y = ks.rot + 0.8;
+                g.add(sidePeak1);
+
+                const sidePeak2 = new THREE.Mesh(new THREE.DodecahedronGeometry(ks.r * 0.46, 0), rockMat);
+                sidePeak2.scale.set(1.0, 1.35, 0.9);
+                sidePeak2.position.set(-ks.r * 0.48, ks.h * 0.36, -0.35);
+                g.add(sidePeak2);
+
+                // Layered moss-green foliage tufts clinging to karst ledges
+                const cap1 = new THREE.Mesh(new THREE.DodecahedronGeometry(ks.r * 0.56, 0), mossMat);
+                cap1.scale.set(1.12, 0.48, 0.95);
+                cap1.position.set(0, ks.h * 0.84, 0);
+                const cap2 = new THREE.Mesh(new THREE.DodecahedronGeometry(ks.r * 0.36, 0), hillMat);
+                cap2.scale.set(1.1, 0.45, 0.9);
+                cap2.position.set(ks.r * 0.50, ks.h * 0.58, 0.42);
+                g.add(cap1, cap2);
+
+                g.position.set(ks.x, -0.5, ks.z);
+                this.lobbyScene.add(g);
+            });
+
+            // Distant misty mountain range along far horizon
+            const farHills = [
+                { x: -12, z: -64, r: 14, h: 8.5 },
+                { x: 3.5, z: -66, r: 13, h: 7.2 },
+                { x: 20, z: -58, r: 16, h: 11.5 }
+            ];
+            farHills.forEach((fh) => {
+                const m = new THREE.Mesh(new THREE.ConeGeometry(fh.r, fh.h, 6), hillDarkMat);
+                m.position.set(fh.x, fh.h * 0.36 - 0.6, fh.z);
+                this.lobbyScene.add(m);
+            });
+
+            // 4B. Right Coastal Peninsula + Stepped Rice Terraces + Khue Van Cac Pavilion
+            const rightCoast = new THREE.Group();
+            const cliffBase = new THREE.Mesh(new THREE.CylinderGeometry(13.5, 16.5, 5.2, 8), cliffBrownMat);
+            cliffBase.position.set(27, 1.4, -14);
+            rightCoast.add(cliffBase);
+
+            const grassPlateau = new THREE.Mesh(new THREE.CylinderGeometry(13.2, 13.8, 1.2, 8), hillMat);
+            grassPlateau.position.set(27, 4.1, -14);
+            rightCoast.add(grassPlateau);
+
+            // Tall terraced hills behind the peninsula
+            const bigHill1 = new THREE.Mesh(new THREE.ConeGeometry(13.5, 14.5, 7), hillMat);
+            bigHill1.position.set(35, 9.5, -26);
+            rightCoast.add(bigHill1);
+
+            const bigHill2 = new THREE.Mesh(new THREE.ConeGeometry(10.5, 11.2, 6), hillDarkMat);
+            bigHill2.position.set(24, 8.2, -31);
+            rightCoast.add(bigHill2);
+
+            // 5-Step Low-Poly Rice Terraces (Green -> Straw Gold)
+            for (let t = 0; t < 5; t++) {
+                const terr = new THREE.Mesh(
+                    new THREE.BoxGeometry(11.5 - t * 1.4, 0.72, 6.2 - t * 0.75),
+                    terraceMats[t % terraceMats.length]
+                );
+                terr.position.set(33.5 + t * 0.35, 4.7 + t * 0.72, -16.5 - t * 0.9);
+                terr.rotation.y = -0.22;
+                rightCoast.add(terr);
+            }
+
+            // Crimson Khue Van Cac Miniature Pavilion on Right Bluff
+            const pavilion = new THREE.Group();
+            const pavPlinth = new THREE.Mesh(new THREE.BoxGeometry(4.4, 0.6, 4.4), rockMat);
+            pavPlinth.position.y = 0.3;
+            pavilion.add(pavPlinth);
+            [[-1.35, -1.35], [1.35, -1.35], [-1.35, 1.35], [1.35, 1.35]].forEach(([px, pz]) => {
+                const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.42, 2.5, 0.42), redWoodMat);
+                pillar.position.set(px, 1.8, pz);
+                pavilion.add(pillar);
+            });
+            const pavUpper = new THREE.Mesh(new THREE.BoxGeometry(3.4, 1.45, 3.4), redWoodMat);
+            pavUpper.position.y = 3.55;
+            pavilion.add(pavUpper);
+            const roof1 = new THREE.Mesh(new THREE.ConeGeometry(3.6, 1.25, 4), roofRedMat);
+            roof1.rotation.y = Math.PI / 4;
+            roof1.position.y = 3.1;
+            pavilion.add(roof1);
+            const roof2 = new THREE.Mesh(new THREE.ConeGeometry(2.85, 1.45, 4), roofRedMat);
+            roof2.rotation.y = Math.PI / 4;
+            roof2.position.y = 4.75;
+            pavilion.add(roof2);
+            const finial = new THREE.Mesh(new THREE.OctahedronGeometry(0.32, 0), goldTrimMat);
+            finial.position.y = 5.65;
+            pavilion.add(finial);
+            pavilion.position.set(22.5, 4.65, -15.5);
+            pavilion.rotation.y = -0.35;
+            rightCoast.add(pavilion);
+
+            // Low-Poly Trees along the green bluff
+            [[18.2, 4.7, -14.2], [19.8, 4.7, -17.5], [25.6, 4.7, -12.8], [27.2, 4.7, -16.8], [16.5, 4.7, -19.2]].forEach(([tx, ty, tz], i) => {
+                const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.22, 1.1, 5), cliffBrownMat);
+                trunk.position.set(tx, ty + 0.55, tz);
+                const crown = new THREE.Mesh(new THREE.DodecahedronGeometry(0.85 + (i % 2) * 0.22, 0), i % 2 === 0 ? mossMat : hillMat);
+                crown.position.set(tx, ty + 1.45, tz);
+                rightCoast.add(trunk, crown);
+            });
+            this.lobbyScene.add(rightCoast);
+
+            // 4C. Iconic Red-and-White Striped Low-Poly Lighthouse + 360° Rotating Golden Beam
+            const lhGroup = new THREE.Group();
+            const lhBluff = new THREE.Mesh(new THREE.ConeGeometry(7.2, 5.4, 7), hillMat);
+            lhBluff.position.y = 2.1;
+            lhGroup.add(lhBluff);
+
+            const stripeHeights = [1.3, 1.25, 1.2, 1.15, 1.1];
+            let curY = 4.55;
+            for (let s = 0; s < stripeHeights.length; s++) {
+                const rBot = 1.38 - s * 0.13;
+                const rTop = 1.25 - s * 0.13;
+                const band = new THREE.Mesh(
+                    new THREE.CylinderGeometry(rTop, rBot, stripeHeights[s], 8),
+                    s % 2 === 0 ? lhRedMat : lhWhiteMat
+                );
+                band.position.y = curY + stripeHeights[s] * 0.5;
+                lhGroup.add(band);
+                curY += stripeHeights[s];
+            }
+            const gallery = new THREE.Mesh(new THREE.CylinderGeometry(1.05, 0.92, 0.28, 8), rockDarkMat);
+            gallery.position.y = curY + 0.14;
+            lhGroup.add(gallery);
+
+            const lanternGlowMat = new THREE.MeshLambertMaterial({
+                color: 0xfff7c2,
+                emissive: 0xfef08a,
+                emissiveIntensity: 1.0,
+                flatShading: true
+            });
+            const lantern = new THREE.Mesh(new THREE.CylinderGeometry(0.68, 0.68, 1.05, 8), lanternGlowMat);
+            lantern.position.y = curY + 0.78;
+            lhGroup.add(lantern);
+
+            const lhCap = new THREE.Mesh(new THREE.ConeGeometry(0.95, 1.05, 8), lhRedMat);
+            lhCap.position.y = curY + 1.78;
+            lhGroup.add(lhCap);
+
+            // Soft radial golden halo sprite on lighthouse lamp (Zero PointLight!)
+            const lhGlowTex = this.createLobbyGlowTexture("rgba(255, 245, 185, 0.95)", "rgba(254, 224, 102, 0.45)");
+            if (lhGlowTex && typeof THREE.Sprite === "function") {
+                const lhSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+                    map: lhGlowTex,
+                    color: 0xfef08a,
+                    transparent: true,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false
+                }));
+                lhSprite.position.set(0, curY + 0.8, 0);
+                lhSprite.scale.set(7.8, 7.8, 1);
+                lhGroup.add(lhSprite);
+            }
+
+            // 360° Rotating Soft Translucent Golden Light Beam (ConeGeometry, opacity 0.115, depthWrite: false)
+            this.lobbyBeaconPivot = new THREE.Group();
+            this.lobbyBeaconPivot.position.set(0, curY + 0.78, 0);
+            const beamGeo = new THREE.ConeGeometry(4.0, 34, 14, 1, true);
+            beamGeo.translate(0, -17, 0);
+            beamGeo.rotateZ(-Math.PI / 2);
+            const beamMat = new THREE.MeshBasicMaterial({
+                color: 0xfef08a,
+                transparent: true,
+                opacity: 0.115,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                side: THREE.DoubleSide
+            });
+            const beam1 = new THREE.Mesh(beamGeo, beamMat);
+            const beam2 = new THREE.Mesh(beamGeo, beamMat);
+            beam2.rotation.y = Math.PI;
+            this.lobbyBeaconPivot.add(beam1, beam2);
+            lhGroup.add(this.lobbyBeaconPivot);
+
+            lhGroup.position.set(8.2, -0.35, -24.5);
+            this.lobbyScene.add(lhGroup);
+
+            // 5. 5 Distinct Sailing Ships Cruising STRICTLY Along Bow Direction (+X = Math.atan2(-vz, vx))
+            this.lobbyShips = [];
+            const wakeGeo = new THREE.RingGeometry(0.45, 0.85, 12);
+            wakeGeo.rotateX(-Math.PI / 2);
+            const wakeMat = new THREE.MeshBasicMaterial({
+                color: 0xf1f5f9,
+                transparent: true,
+                opacity: 0.36,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            // 2 Hero ships closer in foreground + 3 mid/far ships cruising naturally across the bay
+            const shipLanes = [
+                { arch: 0, x: -9.5, z: 12.8, vx: 2.25, vz: -0.22, scale: 1.85 },  // Foreground Hero: Dragon Junk (L -> R)
+                { arch: 1, x: 13.0, z: 7.4,  vx: -2.35, vz: -0.18, scale: 1.72 }, // Foreground Hero: Emerald Catamaran (R -> L)
+                { arch: 2, x: -16.0, z: 0.2, vx: 2.05, vz: 0.16, scale: 1.48 },   // Midground: Ocean Clipper (L -> R)
+                { arch: 3, x: 4.5,  z: -6.8, vx: -1.75, vz: -0.12, scale: 1.32 }, // Mid-Far: Golden Galley (R -> L)
+                { arch: 4, x: -20.0, z: -14.2, vx: 1.55, vz: 0.10, scale: 1.15 }  // Far Bay: Imperial Bark (L -> R)
+            ];
+            if (typeof ProceduralModels !== "undefined" && typeof ProceduralModels.createPlayerShip === "function") {
+                shipLanes.forEach((lane, i) => {
+                    const ship = ProceduralModels.createPlayerShip(lane.arch, "", false);
+                    if (ship.userData) {
+                        ["ring", "innerDisc", "beaconPillar", "localRadarRing", "myArrowMarker"].forEach(k => {
+                            if (ship.userData[k]) ship.userData[k].visible = false;
+                        });
+                    }
+                    // Dial down emissiveIntensity to matte natural 0.04-0.08 so hulls & sails never look plastic!
+                    if (typeof ship.traverse === "function") {
+                        ship.traverse((child) => {
+                            if (child && child.isMesh && child.material && typeof child.material.emissiveIntensity === "number") {
+                                child.material.emissiveIntensity = Math.min(child.material.emissiveIntensity, 0.06);
+                            }
+                        });
+                    }
+                    const speed = Math.hypot(lane.vx, lane.vz) || 1;
+                    const nx = lane.vx / speed;
+                    const nz = lane.vz / speed;
+                    const headingYaw = Math.atan2(-lane.vz, lane.vx);
+
+                    ship.scale.setScalar(lane.scale);
+                    ship.position.set(lane.x, 0.2, lane.z);
+                    ship.rotation.y = headingYaw;
+                    this.lobbyScene.add(ship);
+
+                    // Subtle white foam wake rings trailing strictly behind the stern (-nx, -nz)
+                    const wakes = [];
+                    for (let wIdx = 0; wIdx < 2; wIdx++) {
+                        const wk = new THREE.Mesh(wakeGeo, wakeMat.clone());
+                        wk.position.set(lane.x - nx * (2.2 + wIdx * 1.9), 0.16, lane.z - nz * (2.2 + wIdx * 1.9));
+                        this.lobbyScene.add(wk);
+                        wakes.push({ mesh: wk, phase: wIdx * 0.5 + i * 0.17 });
+                    }
+                    this.lobbyShips.push({
+                        mesh: ship,
+                        lane,
+                        baseZ: lane.z,
+                        nx,
+                        nz,
+                        baseYaw: headingYaw,
+                        wakes,
+                        phase: i * 1.35
+                    });
+                });
+            }
+
+            // 6. 8 Drifting Low-Poly Sunset Clouds
+            this.lobbyClouds = [];
+            const cloudMat = flatMat(0xf5dfbe);
+            const cloudSpecs = [
+                { x: -34, y: 22.5, z: -26, s: 2.3, spd: 0.55 },
+                { x: -16, y: 21.0, z: -38, s: 1.6, spd: 0.42 },
+                { x: -24, y: 15.2, z: -48, s: 1.4, spd: 0.35 },
+                { x: 12, y: 23.8, z: -32, s: 2.1, spd: 0.50 },
+                { x: 32, y: 22.0, z: -24, s: 2.5, spd: 0.58 },
+                { x: 8, y: 16.5, z: -42, s: 1.8, spd: 0.38 },
+                { x: 36, y: 16.2, z: -36, s: 1.5, spd: 0.44 },
+                { x: -42, y: 18.0, z: -32, s: 1.9, spd: 0.48 }
+            ];
+            cloudSpecs.forEach((cs) => {
+                const cg = new THREE.Group();
+                const p1 = new THREE.Mesh(new THREE.DodecahedronGeometry(1.7, 0), cloudMat);
+                p1.scale.set(2.1, 0.72, 1.0);
+                const p2 = new THREE.Mesh(new THREE.DodecahedronGeometry(1.3, 0), cloudMat);
+                p2.position.set(1.7, -0.15, 0.15);
+                p2.scale.set(1.6, 0.62, 0.9);
+                const p3 = new THREE.Mesh(new THREE.DodecahedronGeometry(1.15, 0), cloudMat);
+                p3.position.set(-1.6, -0.2, -0.1);
+                p3.scale.set(1.5, 0.58, 0.85);
+                cg.add(p1, p2, p3);
+                cg.scale.setScalar(cs.s);
+                cg.position.set(cs.x, cs.y, cs.z);
+                this.lobbyScene.add(cg);
+                this.lobbyClouds.push({ mesh: cg, speed: cs.spd });
+            });
+
+            // 7. 6 Low-Poly Flapping Seagulls Circling Lighthouse & Karst Islands
+            this.lobbyGulls = [];
+            const gullMat = new THREE.MeshBasicMaterial({ color: 0xfff8ea, side: THREE.DoubleSide });
+            const wingGeo = new THREE.BoxGeometry(0.68, 0.04, 0.22);
+            wingGeo.translate(0.34, 0, 0);
+            const gullSpecs = [
+                { cx: 11, cy: 14.5, cz: -25, r: 7.5, spd: 0.55, ph: 0.0 },
+                { cx: 13, cy: 15.8, cz: -27, r: 9.2, spd: 0.48, ph: 1.5 },
+                { cx: 9, cy: 13.8, cz: -23, r: 6.4, spd: 0.62, ph: 3.1 },
+                { cx: -20, cy: 14.8, cz: -28, r: 8.0, spd: 0.50, ph: 0.9 },
+                { cx: -23, cy: 16.0, cz: -31, r: 9.5, spd: 0.45, ph: 2.4 },
+                { cx: -16, cy: 13.5, cz: -33, r: 7.2, spd: 0.58, ph: 4.2 }
+            ];
+            gullSpecs.forEach((gs) => {
+                const gg = new THREE.Group();
+                const leftW = new THREE.Mesh(wingGeo, gullMat);
+                const rightW = new THREE.Mesh(wingGeo, gullMat);
+                rightW.scale.x = -1;
+                gg.add(leftW, rightW);
+                this.lobbyScene.add(gg);
+                this.lobbyGulls.push({ group: gg, leftW, rightW, ...gs });
+            });
+        } catch (err) {
+            this.lobbyScene = null;
+            this.lobbyCamera = null;
+        }
+    }
+
+    updateLobbySunsetScene(elapsed, delta) {
+        if (!this.lobbyScene || !this.lobbyCamera) return;
+
+        // 1. Animate Faceted Low-Poly Ocean Waves
+        if (this.lobbyWaveMesh && this.lobbyWaveBaseXZ) {
+            const shouldStepWaves = !this.lobbyWaveSmooth || (this._frameCount % 2 === 0);
+            if (shouldStepWaves) {
+                const geo = this.lobbyWaveMesh.geometry;
+                const pos = geo && geo.attributes && geo.attributes.position;
+                if (pos) {
+                    const base = this.lobbyWaveBaseXZ;
+                    const count = pos.count;
+                    for (let i = 0; i < count; i++) {
+                        const vx = base[i * 2];
+                        const vz = base[i * 2 + 1];
+                        pos.setY(i, this.getLobbyWaveY(vx, vz, elapsed));
+                    }
+                    pos.needsUpdate = true;
+                    geo.computeVertexNormals();
+                }
+            }
+        }
+
+        // 2. Rotate Lighthouse 360° Soft Golden Light Beam Gently
+        if (this.lobbyBeaconPivot) {
+            this.lobbyBeaconPivot.rotation.y += delta * 0.36;
+        }
+
+        // 3. Cruise 5 Sailing Ships Strictly Along Bow (+X = atan2(-vz, vx)) + Wave Pitch/Roll + Wakes
+        for (let i = 0; i < this.lobbyShips.length; i++) {
+            const s = this.lobbyShips[i];
+            const mesh = s.mesh;
+            const lane = s.lane;
+            mesh.position.x += lane.vx * delta;
+            mesh.position.z += lane.vz * delta;
+
+            if (lane.vx > 0 && mesh.position.x > 46) {
+                mesh.position.x = -46;
+                mesh.position.z = s.baseZ;
+            } else if (lane.vx < 0 && mesh.position.x < -46) {
+                mesh.position.x = 46;
+                mesh.position.z = s.baseZ;
+            }
+
+            const wx = mesh.position.x;
+            const wz = mesh.position.z - (-24);
+            const waveY = this.getLobbyWaveY(wx, wz, elapsed);
+            const waveAhead = this.getLobbyWaveY(wx + s.nx * 1.6, wz + s.nz * 1.6, elapsed);
+            const waveRight = this.getLobbyWaveY(wx - s.nz * 1.2, wz + s.nx * 1.2, elapsed);
+
+            mesh.position.y = waveY + 0.14;
+            mesh.rotation.y = s.baseYaw + Math.sin(elapsed * 0.85 + s.phase) * 0.028;
+            // Pitch bow (+X) up/down with forward slope, roll gently side-to-side
+            mesh.rotation.z = (waveAhead - waveY) * 0.22;
+            mesh.rotation.x = (waveRight - waveY) * -0.18;
+
+            if (mesh.userData) {
+                if (mesh.userData.flag) {
+                    mesh.userData.flag.rotation.y = Math.sin(elapsed * 5.2 + s.phase) * 0.28;
+                }
+                if (mesh.userData.mainSail) {
+                    mesh.userData.mainSail.scale.z = 1 + Math.sin(elapsed * 2.4 + s.phase) * 0.05;
+                }
+                if (mesh.userData.foreSail) {
+                    mesh.userData.foreSail.scale.z = 1 + Math.cos(elapsed * 2.6 + s.phase) * 0.04;
+                }
+            }
+
+            // Update trailing white foam wakes strictly behind the stern (-nx, -nz)
+            for (let w = 0; w < s.wakes.length; w++) {
+                const wk = s.wakes[w];
+                const prog = (elapsed * 0.65 + wk.phase) % 1;
+                const distBehind = (1.5 + prog * 3.4) * (lane.scale / 1.48);
+                wk.mesh.position.set(
+                    wx - s.nx * distBehind,
+                    waveY + 0.12,
+                    mesh.position.z - s.nz * distBehind
+                );
+                const sc = (0.72 + prog * 1.32) * (lane.scale / 1.48);
+                wk.mesh.scale.set(sc, sc, sc);
+                if (wk.mesh.material) wk.mesh.material.opacity = (1 - prog) * 0.36;
+            }
+        }
+
+        // 4. Drift Low-Poly Sunset Clouds
+        for (let i = 0; i < this.lobbyClouds.length; i++) {
+            const c = this.lobbyClouds[i];
+            c.mesh.position.x += c.speed * delta;
+            if (c.mesh.position.x > 62) c.mesh.position.x = -62;
+        }
+
+        // 5. Flap & Circle Low-Poly Seagulls
+        for (let i = 0; i < this.lobbyGulls.length; i++) {
+            const g = this.lobbyGulls[i];
+            const ang = elapsed * g.spd + g.ph;
+            const gx = g.cx + Math.cos(ang) * g.r;
+            const gz = g.cz + Math.sin(ang) * g.r * 0.62;
+            const gy = g.cy + Math.sin(elapsed * 1.4 + g.ph) * 0.45;
+            g.group.position.set(gx, gy, gz);
+            g.group.rotation.y = -ang;
+            const flap = Math.sin(elapsed * 7.8 + g.ph * 2) * 0.58;
+            g.leftW.rotation.z = flap;
+            g.rightW.rotation.z = -flap;
+        }
+
+        // 6. Smooth Cinematic Mouse Parallax (Gentle Lerp — Keeps 4 Corner UIs Clean)
+        const lerpF = Math.min(1, delta * 3.2);
+        this.lobbyParallaxX += (this.lobbyMouseX - this.lobbyParallaxX) * lerpF;
+        this.lobbyParallaxY += (this.lobbyMouseY - this.lobbyParallaxY) * lerpF;
+
+        const baseX = this.lobbyParallaxX * 2.4 + Math.sin(elapsed * 0.18) * 0.55;
+        const baseY = 7.6 - this.lobbyParallaxY * 0.85 + Math.cos(elapsed * 0.22) * 0.18;
+        this.lobbyCamera.position.set(baseX, baseY, 30.5);
+        if (typeof this.lobbyCamera.lookAt === "function") {
+            this.lobbyCamera.lookAt(0.5 + this.lobbyParallaxX * 0.5, 4.4 - this.lobbyParallaxY * 0.25, -22);
+        }
+    }
+
+    clearMatchVisuals() {
+        if (this.shipMeshes) {
+            this.shipMeshes.forEach(mesh => this.scene && this.scene.remove(mesh));
+            this.shipMeshes.clear();
+        }
+        if (typeof this.clearHtmlLabels === "function") {
+            this.clearHtmlLabels("ship");
+        }
+        if (typeof this.clearPathPreview === "function") {
+            this.clearPathPreview();
+        }
+        if (typeof this.clearReachableHexes === "function") {
+            this.clearReachableHexes();
+        }
+        if (Array.isArray(this.hexTiles)) {
+            this.hexTiles.forEach(t => {
+                t.stormRestricted = false;
+                t.resourceCooldown = 0;
+                t.monumentLocked = false;
+            });
+            if (typeof this.updateResourceVisuals === "function") {
+                this.updateResourceVisuals();
+            }
+        }
+        if (typeof this.setWeatherMode === "function") {
+            this.setWeatherMode("sunny");
+        }
+        this.cameraLockEnabled = false;
+        this.cameraLockShipKey = null;
     }
 
     toggleCameraLock(player = null) {
@@ -562,6 +1287,10 @@ class World3D {
         };
 
         const p = presets[validMode] || presets.sunny;
+        if (this.scene && this.scene.fog) {
+            this.scene.fog.near = 280;
+            this.scene.fog.far = 680;
+        }
         const now = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
         if (validMode === "thunderstorm" || validMode === "super_typhoon_yagi") {
             this._nextLightningAt = now + 2800 + Math.random() * 4200;
@@ -1168,7 +1897,9 @@ class World3D {
                         q,
                         r,
                         col,
+                        minLandCol: rowSpec.minCol,
                         maxLandCol: rowSpec.maxCol,
+                        isCoastalEdge: (col === rowSpec.maxCol || col === rowSpec.minCol || r === -14 || r === 14),
                         regionId: regId,
                         terrain: mainTerrain,
                         navigable: false
@@ -1310,10 +2041,10 @@ class World3D {
         const useInstanced = typeof THREE.InstancedMesh === "function" && typeof THREE.Object3D === "function";
         const dummy = useInstanced ? new THREE.Object3D() : null;
 
-        // 1. InstancedMesh for Coastal Sand Skirts (1 Draw Call)
+        // 1. InstancedMesh for Coastal Sand Skirts (1 Draw Call, warm coastal beach sand #dcc18a)
         if (useInstanced && this._sandInstances.length > 0) {
-            const sandGeo = new THREE.CylinderGeometry(this.hexRadius * 1.01, this.hexRadius * 1.05, 0.15, 6);
-            const sandMat = new THREE.MeshLambertMaterial({ color: 0xd6c79c });
+            const sandGeo = new THREE.CylinderGeometry(this.hexRadius * 1.02, this.hexRadius * 1.07, 0.16, 6);
+            const sandMat = new THREE.MeshLambertMaterial({ color: 0xdcc18a, flatShading: true });
             const sandIM = new THREE.InstancedMesh(sandGeo, sandMat, this._sandInstances.length);
             sandIM.receiveShadow = true;
             sandIM.castShadow = false;
@@ -1328,10 +2059,10 @@ class World3D {
             this.boardGroup.add(sandIM);
         }
 
-        // 2. InstancedMesh for Static Land Hex Columns (1 Draw Call)
+        // 2. InstancedMesh for Static Land Hex Cliff Columns (1 Draw Call, warm earthy cliff sides #6e5239 / #5c4938)
         if (useInstanced && this._landBaseInstances.length > 0) {
             const unitHexGeo = new THREE.CylinderGeometry(this.hexRadius * 0.96, this.hexRadius * 1.0, 1.0, 6);
-            const landMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+            const landMat = new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true });
             const landIM = new THREE.InstancedMesh(unitHexGeo, landMat, this._landBaseInstances.length);
             landIM.receiveShadow = true;
             landIM.castShadow = false;
@@ -1348,15 +2079,15 @@ class World3D {
             this.boardGroup.add(landIM);
         }
 
-        // 3. InstancedMesh for Static Land Plateau Caps (1 Draw Call)
+        // 3. InstancedMesh for Static Land Top Turf Plateau Caps (1 Draw Call, rich natural 6-region turf)
         if (useInstanced && this._landCapInstances.length > 0) {
-            const capGeo = new THREE.CylinderGeometry(this.hexRadius * 0.84, this.hexRadius * 0.94, 0.09, 6);
-            const capMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+            const capGeo = new THREE.CylinderGeometry(this.hexRadius * 0.94, this.hexRadius * 0.975, 0.13, 6);
+            const capMat = new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true });
             const capIM = new THREE.InstancedMesh(capGeo, capMat, this._landCapInstances.length);
             capIM.receiveShadow = true;
             capIM.castShadow = false;
             this._landCapInstances.forEach((it, i) => {
-                dummy.position.set(it.x, it.height - 0.06, it.z);
+                dummy.position.set(it.x, it.height - 0.055, it.z);
                 dummy.scale.set(1, 1, 1);
                 dummy.rotation.set(0, 0, 0);
                 dummy.updateMatrix();
@@ -1386,6 +2117,42 @@ class World3D {
             rimIM.instanceMatrix.needsUpdate = true;
             if (rimIM.instanceColor) rimIM.instanceColor.needsUpdate = true;
             this.boardGroup.add(rimIM);
+        }
+
+        // 4b. Single-Draw-Call Ultra-Thin Static Hex Outlines for Land & Coastal Tiles (crisp terrain definition at far zoom!)
+        if (this._landBaseInstances.length > 0 && typeof THREE.LineSegments !== "undefined") {
+            const edgeVerts = [];
+            const rEdge = this.hexRadius * 0.965;
+            const cornerX = [];
+            const cornerZ = [];
+            for (let k = 0; k < 6; k++) {
+                const theta = (k * Math.PI) / 3;
+                cornerX.push(rEdge * Math.sin(theta));
+                cornerZ.push(rEdge * Math.cos(theta));
+            }
+            this._landBaseInstances.forEach(it => {
+                const ey = it.height + 0.02;
+                for (let k = 0; k < 6; k++) {
+                    const n = (k + 1) % 6;
+                    edgeVerts.push(
+                        it.x + cornerX[k], ey, it.z + cornerZ[k],
+                        it.x + cornerX[n], ey, it.z + cornerZ[n]
+                    );
+                }
+            });
+            const edgeGeo = new THREE.BufferGeometry();
+            if (typeof THREE.Float32BufferAttribute !== "undefined") {
+                edgeGeo.setAttribute("position", new THREE.Float32BufferAttribute(edgeVerts, 3));
+            }
+            const edgeMat = new THREE.LineBasicMaterial({
+                color: 0x1e293b,
+                transparent: true,
+                opacity: 0.24,
+                depthWrite: false
+            });
+            const hexOutlineSegments = new THREE.LineSegments(edgeGeo, edgeMat);
+            hexOutlineSegments.renderOrder = 12;
+            this.boardGroup.add(hexOutlineSegments);
         }
 
         // 5. InstancedMesh for Sharp Dark-Gray Reef Spires & Thin White Foam Rings (2 Draw Calls for all reefs!)
@@ -1461,24 +2228,235 @@ class World3D {
         });
     }
 
+    clearHtmlLabels(kindFilter = null) {
+        if (!this.htmlLabels) return;
+        for (const [id, entry] of this.htmlLabels.entries()) {
+            if (kindFilter && entry.kind !== kindFilter) continue;
+            if (entry.el && entry.el.parentNode) {
+                entry.el.parentNode.removeChild(entry.el);
+            }
+            this.htmlLabels.delete(id);
+        }
+    }
+
+    registerHtmlLabel(id, kind, className, html, anchorVec = null, shipMesh = null, yOffset = 0) {
+        if (typeof document === "undefined") return null;
+        if (!this.htmlLabelLayer) {
+            this.htmlLabelLayer = document.getElementById("map-labels-layer");
+        }
+        if (!this.htmlLabelLayer) return null;
+
+        let entry = this.htmlLabels.get(id);
+        if (!entry) {
+            const el = document.createElement("div");
+            el.className = `map-lbl ${className}`;
+            el.innerHTML = html;
+            el.style.display = "none";
+            this.htmlLabelLayer.appendChild(el);
+            entry = { id, kind, el, anchor: anchorVec, shipMesh, yOffset, hidden: true };
+            this.htmlLabels.set(id, entry);
+        } else {
+            entry.el.className = `map-lbl ${className}`;
+            entry.el.innerHTML = html;
+            if (anchorVec) entry.anchor = anchorVec;
+            entry.shipMesh = shipMesh;
+            entry.yOffset = yOffset;
+        }
+        return entry;
+    }
+
+    setHtmlLabelMode(mode = "compact") {
+        const valid = ["compact", "full", "regions-blockade", "hidden"].includes(mode) ? mode : "compact";
+        this.htmlLabelMode = valid;
+        if (!this.htmlLabelLayer && typeof document !== "undefined") {
+            this.htmlLabelLayer = document.getElementById("map-labels-layer");
+        }
+        if (this.htmlLabelLayer) {
+            this.htmlLabelLayer.classList.remove("labels-compact", "labels-full", "labels-regions-blockade", "labels-hidden");
+            this.htmlLabelLayer.classList.add(`labels-${valid}`);
+        }
+        return valid;
+    }
+
+    setMonumentHtmlLabel(tile, state = { mode: "active" }) {
+        if (!tile || !tile.monumentId) return;
+        const tier = tile.monumentTier || 1;
+        const mode = (state && state.mode) || "active";
+        const shortMonMap = {
+            mon_sapa: "Sa Pa",
+            mon_halong: "Vịnh Hạ Long",
+            mon_vanmieu: "Văn Miếu",
+            mon_phongnha: "Phong Nha",
+            mon_hue: "Cố Đô Huế",
+            mon_myson: "Mỹ Sơn",
+            mon_taynguyen: "Nhà Rông",
+            mon_bennharong: "Bến Nhà Rồng",
+            mon_cairang: "Chợ Nổi"
+        };
+        const shortName = shortMonMap[tile.monumentId] || String(tile.monumentName || "Di Tích").replace(/^Di tích\s+/i, "");
+        const stars = tier === 1 ? "★" : (tier === 2 ? "★★" : "★★★");
+
+        let cls = `map-lbl-monument tier-${tier}`;
+        let badgeHtml = `${stars}${tier}`;
+        let customStyle = "";
+
+        if (mode === "early_locked") {
+            cls = `map-lbl-monument mode-locked`;
+            badgeHtml = `🔒${tier}`;
+        } else if (mode === "conquered") {
+            const cCol = (state && state.conquerorColor) || "#34d399";
+            cls = `map-lbl-monument mode-conquered`;
+            badgeHtml = `<span class="map-lbl-dot" style="background:${cCol}"></span>✅`;
+            customStyle = `--conq-color:${cCol};`;
+        }
+
+        const html = `
+            <div class="mon-pill" style="${customStyle}">
+                <span class="mon-badge">${badgeHtml}</span>
+                <span class="map-label-name">${shortName}</span>
+            </div>
+        `;
+        const anchor = new THREE.Vector3(tile.x, (tile.height || 0.22) + 3.95, tile.z);
+        this.registerHtmlLabel(`mon_${tile.monumentId}`, "monument", cls, html, anchor);
+    }
+
+    setPortHtmlLabel(tile, state = { mode: "free" }) {
+        if (!tile || !tile.isPort) return;
+        const mode = (state && state.mode) || "free";
+        const needsWarn = Boolean(state && state.needsCoinWarning);
+        const ownerColor = (state && state.ownerColor) || "#38bdf8";
+
+        const shortPortMap = {
+            0: "Cái Lân",
+            1: "Hải Phòng",
+            2: "Tiên Sa",
+            3: "Quy Nhơn",
+            4: "Cái Mép",
+            5: "Cần Thơ"
+        };
+        const shortPort = shortPortMap[tile.regionId] || String(tile.portName || "Thương Cảng").replace(/^Thương Cảng\s+/i, "");
+
+        let cls = "map-lbl-port port-free";
+        let compactBadgeHtml = `🌐⚓`;
+        let fullPrefixHtml = `🌐`;
+        let fullNameHtml = shortPort;
+        let customStyle = "";
+
+        if (mode === "mine") {
+            cls = "map-lbl-port port-mine";
+            compactBadgeHtml = `👑⚓`;
+            fullPrefixHtml = `👑`;
+            fullNameHtml = shortPort;
+        } else if (mode === "other") {
+            if (needsWarn) {
+                cls = "map-lbl-port port-other port-warn";
+                compactBadgeHtml = `⛔`;
+                fullPrefixHtml = `⛔`;
+                fullNameHtml = shortPort;
+            } else {
+                cls = "map-lbl-port port-other";
+                compactBadgeHtml = `<span class="map-lbl-dot" style="background:${ownerColor}"></span>⚓1💰`;
+                fullPrefixHtml = `<span class="map-lbl-dot" style="background:${ownerColor}"></span>⚓`;
+                fullNameHtml = `${shortPort} • 1💰`;
+            }
+            customStyle = `--owner-color:${ownerColor};`;
+        }
+
+        const html = `
+            <div class="port-pill" style="${customStyle}">
+                <span class="port-badge port-compact-only">${compactBadgeHtml}</span>
+                <span class="port-badge port-full-only">${fullPrefixHtml}</span>
+                <span class="map-label-name">${fullNameHtml}</span>
+            </div>
+        `;
+        const anchor = new THREE.Vector3(tile.x, (tile.height || 0.22) + 3.55, tile.z);
+        this.registerHtmlLabel(`port_${tile.regionId}`, "port", cls, html, anchor);
+    }
+
+    updateHtmlLabelsProjection() {
+        if (!this.htmlLabelLayer || !this.htmlLabels || this.htmlLabels.size === 0 || !this.camera || !this.renderer) return;
+
+        // Expand ONLY the hovered Monument or Port label in Compact mode (no camera-distance override!)
+        const hovId = this.hoveredHex
+            ? (this.hoveredHex.monumentId ? `mon_${this.hoveredHex.monumentId}` : (this.hoveredHex.isPort ? `port_${this.hoveredHex.regionId}` : null))
+            : null;
+        if (hovId !== this._lastHoveredHtmlId) {
+            if (this._lastHoveredHtmlId) {
+                const prev = this.htmlLabels.get(this._lastHoveredHtmlId);
+                if (prev && prev.el) prev.el.classList.remove("is-hovered");
+            }
+            if (hovId) {
+                const cur = this.htmlLabels.get(hovId);
+                if (cur && cur.el) cur.el.classList.add("is-hovered");
+            }
+            this._lastHoveredHtmlId = hovId;
+        }
+
+        const domEl = this.renderer.domElement;
+        const w = (domEl && domEl.clientWidth) || (typeof window !== "undefined" ? window.innerWidth : 1280);
+        const h = (domEl && domEl.clientHeight) || (typeof window !== "undefined" ? window.innerHeight : 720);
+        const v = this._projVec;
+        if (!v || typeof v.project !== "function") return;
+
+        this.htmlLabels.forEach(entry => {
+            if (!entry.el) return;
+            if (entry.shipMesh) {
+                if (!entry.shipMesh.visible) {
+                    if (!entry.hidden) {
+                        entry.el.style.display = "none";
+                        entry.hidden = true;
+                    }
+                    return;
+                }
+                v.set(entry.shipMesh.position.x, entry.shipMesh.position.y + (entry.yOffset || 3.15), entry.shipMesh.position.z);
+            } else if (entry.anchor) {
+                v.copy(entry.anchor);
+            } else {
+                return;
+            }
+
+            v.project(this.camera);
+            if (v.z > 1 || v.z < -1) {
+                if (!entry.hidden) {
+                    entry.el.style.display = "none";
+                    entry.hidden = true;
+                }
+                return;
+            }
+
+            const sx = (v.x * 0.5 + 0.5) * w;
+            const sy = (-v.y * 0.5 + 0.5) * h;
+            if (sx < -140 || sx > w + 140 || sy < -90 || sy > h + 90) {
+                if (!entry.hidden) {
+                    entry.el.style.display = "none";
+                    entry.hidden = true;
+                }
+                return;
+            }
+
+            if (entry.hidden) {
+                entry.el.style.display = "";
+                entry.hidden = false;
+            }
+            entry.el.style.transform = `translate3d(${sx.toFixed(1)}px,${sy.toFixed(1)}px,0) translate(-50%,-100%)`;
+        });
+    }
+
     buildRegionBanners() {
         this.regionBannerSprites = [];
-        // Positioned in clear open areas of each region (inland/west side) so they never overlap coastal Monuments or Ports!
+        this.clearHtmlLabels("region");
         const regionBanners = [
-            { r: -13, col: -3.2, line1: "1. TRUNG DU &", line2: "MIỀN NÚI BẮC BỘ", color: "#22c55e" },
-            { r: -10, col: -3.4, line1: "2. ĐỒNG BẰNG", line2: "SÔNG HỒNG", color: "#facc15" },
-            { r: -6,  col: -4.4, line1: "3. DUYÊN HẢI", line2: "MIỀN TRUNG", color: "#38bdf8" },
-            { r: 1,   col: -0.2, line1: "4. TÂY NGUYÊN", line2: "ĐẠI NGÀN BAZAN", color: "#f97316" },
-            { r: 6,   col: -3.4, line1: "5. ĐÔNG NAM BỘ", line2: "ĐẦU TÀU KINH TẾ", color: "#f43f5e" },
-            { r: 11,  col: -7.2, line1: "6. ĐỒNG BẰNG", line2: "SÔNG CỬU LONG", color: "#84cc16" }
+            { id: "reg_0", r: -14.2, col: -5.2, line1: "MN BẮC BỘ" },
+            { id: "reg_1", r: -9.6,  col: -1.6, line1: "ĐB SÔNG HỒNG" },
+            { id: "reg_2", r: -4.5,  col: -4.4, line1: "MIỀN TRUNG" },
+            { id: "reg_3", r: 1.5,   col: -2.2, line1: "TÂY NGUYÊN" },
+            { id: "reg_4", r: 6.2,   col: -3.2, line1: "ĐÔNG NAM BỘ" },
+            { id: "reg_5", r: 11.2,  col: -6.8, line1: "ĐB SÔNG CỬU LONG" }
         ];
         regionBanners.forEach(rb => {
             const q = -Math.floor(rb.r / 2) + rb.col;
             const { x, z } = this.axialToWorld(q, rb.r);
-            const sprite = ProceduralModels.createRegionBannerSprite(rb.line1, rb.line2, rb.color, 5.2, 1.30);
-            sprite.position.set(x, 3.15, z);
-            this.boardGroup.add(sprite);
-            this.regionBannerSprites.push(sprite);
+            this.registerHtmlLabel(rb.id, "region", "map-label-region", `<span>${rb.line1}</span>`, new THREE.Vector3(x, 2.0, z));
         });
 
         const compass = ProceduralModels.createTabletopCompassAndTitlePlaque();
@@ -1498,8 +2476,9 @@ class World3D {
         let height = 0.22;
         let topColor = new THREE.Color(region.color);
         let capColor = topColor.clone();
+        // Warm earthy stone-brown cliff walls for mainland hex sides (#6e5239 / #5c4938)
+        let cliffColor = new THREE.Color(jitter > 0.5 ? 0x6e5239 : 0x5c4938);
 
-        const pastelBase = new THREE.Color(0xc8c3b8);
         if (spec.terrain === "sea") {
             height = 0.14;
             const seaDist = Math.max(1, (spec.col || 0) - (spec.maxLandCol !== undefined ? spec.maxLandCol : 0));
@@ -1524,30 +2503,46 @@ class World3D {
         } else if (spec.terrain === "archipelago") {
             height = 0.36;
             topColor = new THREE.Color(0x1e6b6b);
-        } else if (spec.terrain === "mountain") {
-            height = 0.62 + jitter * 0.22;
-            topColor.lerp(pastelBase, 0.44).offsetHSL(0, -0.30 + (jitter - 0.5) * 0.03, -0.02 + (jitter - 0.5) * 0.02);
-            capColor = topColor.clone().offsetHSL(0, 0.01, 0.03);
-        } else if (spec.terrain === "highland") {
-            height = 0.52 + jitter * 0.16;
-            topColor.lerp(pastelBase, 0.44).offsetHSL(0, -0.30 + (jitter - 0.5) * 0.03, -0.02 + (jitter - 0.5) * 0.02);
-            capColor = topColor.clone().offsetHSL(0, 0.01, 0.02);
-        } else if (spec.terrain === "southeast_land") {
-            height = 0.42 + jitter * 0.10;
-            topColor.lerp(pastelBase, 0.46).offsetHSL(0, -0.30, -0.01);
-            capColor = topColor.clone().offsetHSL(0, 0.01, 0.02);
-        } else if (spec.terrain === "coast_land") {
-            height = 0.38 + jitter * 0.09;
-            topColor.lerp(pastelBase, 0.46).offsetHSL(0, -0.30, -0.01);
-            capColor = topColor.clone().offsetHSL(0, 0.01, 0.03);
-        } else if (spec.terrain === "delta_land") {
-            height = 0.34 + jitter * 0.07;
-            topColor.lerp(pastelBase, 0.46).offsetHSL(0, -0.30, -0.01);
-            capColor = topColor.clone().offsetHSL(0, 0.01, 0.02);
+            cliffColor = topColor.clone();
+        } else if (!spec.navigable) {
+            // 6 VIETNAMESE ECONOMIC REGIONS — RICH, WARM, NATURAL TOP TURF COLORS (NO WASH-OUT, NO EMISSIVE)
+            const rId = spec.regionId;
+            if (rId === 0) {
+                // Vùng 0 (TD&MN Bắc Bộ): Xanh rừng núi trầm (#356b3d) xen mảng xanh rêu (#2b5832), địa hình cao hơn đồng bằng
+                height = 0.72 + jitter * 0.22;
+                capColor = new THREE.Color(jitter > 0.45 ? 0x356b3d : 0x2b5832);
+            } else if (rId === 1) {
+                // Vùng 1 (ĐB Sông Hồng): Xanh lúa đồng bằng ấm (#6b943a) xen đất phù sa nhẹ (#87993c)
+                height = 0.34 + jitter * 0.06;
+                capColor = new THREE.Color(jitter > 0.48 ? 0x6b943a : 0x87993c);
+            } else if (rId === 2) {
+                // Vùng 2 (Bắc Trung Bộ & DHMT): Xanh đồi duyên hải (#53844a) chuyển sáng nhẹ về phía biển
+                const isMountainEdge = (spec.terrain === "mountain");
+                height = isMountainEdge ? (0.58 + jitter * 0.14) : (0.42 + jitter * 0.09);
+                capColor = new THREE.Color(0x53844a);
+                if (spec.col === spec.maxLandCol) {
+                    capColor.lerp(new THREE.Color(0x739c58), 0.35);
+                } else if (isMountainEdge) {
+                    capColor.lerp(new THREE.Color(0x3b683b), 0.35);
+                }
+            } else if (rId === 3) {
+                // Vùng 3 (Tây Nguyên): Đất đỏ Bazan đặc trưng (#8f4a27) xen mảng xanh đồi cà phê (#6e5128), cao nguyên nâng rõ
+                height = 0.62 + jitter * 0.16;
+                capColor = new THREE.Color(jitter > 0.40 ? 0x8f4a27 : 0x6e5128);
+            } else if (rId === 4) {
+                // Vùng 4 (Đông Nam Bộ): Xanh ô-liu pha đất xám (#5d803d)
+                height = 0.42 + jitter * 0.08;
+                capColor = new THREE.Color(0x5d803d).offsetHSL(0, 0, (jitter - 0.5) * 0.03);
+            } else {
+                // Vùng 5 (ĐB Sông Cửu Long): Xanh miệt vườn phù sa tươi dịu (#4c8c3b)
+                height = 0.32 + jitter * 0.06;
+                capColor = new THREE.Color(0x4c8c3b).offsetHSL(0, 0, (jitter - 0.5) * 0.03);
+            }
+            topColor = cliffColor.clone();
         } else if (spec.terrain === "island") {
             height = 0.32;
-            topColor.lerp(pastelBase, 0.36).offsetHSL(0, -0.22, -0.01);
-            capColor = topColor.clone().offsetHSL(0, 0.01, 0.03);
+            topColor = new THREE.Color(0x4a7c45);
+            capColor = topColor.clone();
         } else {
             height = 0.26;
         }
@@ -1557,13 +2552,14 @@ class World3D {
         const defaultBaseOpacity = spec.terrain === "sea" ? 0.50 : (isWaterHex ? 0.70 : 1.0);
         const useInstanced = typeof THREE.InstancedMesh === "function";
 
-        // Stratified Layer 1: Golden Sandy Beach / Coastal Shelf Skirt for Mainland & Islands
-        if (!isWaterHex && spec.terrain !== "reef") {
+        // Stratified Layer 1: Warm Golden Sandy Beach Skirt (#dcc18a) along coastal mainland edges & islands
+        const needsCoastalSand = (!isWaterHex && spec.terrain !== "reef") && (spec.isCoastalEdge || spec.terrain === "island" || spec.terrain === "archipelago");
+        if (needsCoastalSand) {
             if (useInstanced) {
                 this._sandInstances.push({ x, z });
             } else {
-                const sandGeo = new THREE.CylinderGeometry(this.hexRadius * 1.01, this.hexRadius * 1.05, 0.15, 6);
-                const sandMat = new THREE.MeshLambertMaterial({ color: 0xfde68a });
+                const sandGeo = new THREE.CylinderGeometry(this.hexRadius * 1.02, this.hexRadius * 1.07, 0.16, 6);
+                const sandMat = new THREE.MeshLambertMaterial({ color: 0xdcc18a, flatShading: true });
                 const sandSkirt = new THREE.Mesh(sandGeo, sandMat);
                 sandSkirt.position.y = -0.02;
                 sandSkirt.receiveShadow = true;
@@ -1571,10 +2567,13 @@ class World3D {
             }
         }
 
-        // Stratified Layer 2: Main Hex Column (Static land hexes batched via InstancedMesh!)
+        // Stratified Layer 2: Main Hex Column (Static land hexes batched via InstancedMesh — sides ~25% darker than top turf for 3D edge crispness!)
         let baseMesh = null;
         if (isStaticLandHex && useInstanced) {
-            this._landBaseInstances.push({ x, z, height, color: topColor });
+            const sideColor = (capColor && typeof capColor.clone === "function" && typeof capColor.multiplyScalar === "function")
+                ? capColor.clone().multiplyScalar(0.75)
+                : topColor;
+            this._landBaseInstances.push({ x, z, height, color: sideColor });
         } else {
             const hexGeo = new THREE.CylinderGeometry(this.hexRadius * 0.96, this.hexRadius * 1.0, height, 6);
             const hexMat = new THREE.MeshLambertMaterial({
@@ -1729,90 +2728,141 @@ class World3D {
             monModel.position.y = surfaceY;
             group.add(monModel);
             tileObj.propModel = monModel;
+            tileObj.monumentName = monData.name;
+            tileObj.monumentVisualKey = "active||";
 
             // Tier-colored Emissive Base Rim for Monuments (Tier 1: Emerald, Tier 2: Gold, Tier 3: Orange-Red)
             const tierRimPalette = {
-                1: { col: 0x10b981, em: 0x059669 },
-                2: { col: 0xfbbf24, em: 0xf59e0b },
-                3: { col: 0xf97316, em: 0xea580c }
-            }[tier] || { col: 0xfbbf24, em: 0xf59e0b };
+                1: { col: 0x34d399, em: 0x059669 },
+                2: { col: 0xfde047, em: 0xd97706 },
+                3: { col: 0xfb923c, em: 0xdc2626 }
+            }[tier] || { col: 0xfde047, em: 0xd97706 };
             addPOIEmissiveRim(tierRimPalette.col, tierRimPalette.em);
 
-            // Soft AdditiveBlending Vertical Light Column ONLY for Tier 2 & Tier 3 Monuments (opacity 0.15)
-            const tierHexColors = { 1: 0x10b981, 2: 0xf59e0b, 3: 0xf97316 };
-            const glowHex = tierHexColors[tier] || 0xfbbf24;
-            if (tier >= 2) {
-                const glowGroup = new THREE.Group();
-                glowGroup.position.y = surfaceY;
+            // Tiered Lightweight Ground Halo + Vertical Light Column (MeshBasicMaterial, AdditiveBlending, depthWrite: false, zero PointLight)
+            const tierBeaconCfg = {
+                1: { color: 0x34d399, haloColor: 0x10b981, height: 3.6, rTop: 0.14, rBot: 0.54, opacity: 0.16 },
+                2: { color: 0xfde047, haloColor: 0xf59e0b, height: 5.4, rTop: 0.17, rBot: 0.62, opacity: 0.19 },
+                3: { color: 0xfb923c, haloColor: 0xef4444, height: 7.2, rTop: 0.20, rBot: 0.72, opacity: 0.22 }
+            }[tier] || { color: 0xfde047, haloColor: 0xf59e0b, height: 5.4, rTop: 0.17, rBot: 0.62, opacity: 0.19 };
 
-                const beaconGeo = new THREE.CylinderGeometry(0.18, 0.68, 6.4, 12, 1, true);
-                const beaconMat = new THREE.MeshBasicMaterial({
-                    color: glowHex,
-                    transparent: true,
-                    opacity: 0.15,
-                    blending: THREE.AdditiveBlending,
-                    side: THREE.DoubleSide,
-                    depthWrite: false
-                });
-                const beaconMesh = new THREE.Mesh(beaconGeo, beaconMat);
-                beaconMesh.position.y = 3.8;
-                glowGroup.add(beaconMesh);
+            const glowGroup = new THREE.Group();
+            glowGroup.position.y = surfaceY;
 
-                glowGroup.userData = { beaconMesh, baseColor: glowHex };
-                group.add(glowGroup);
-                tileObj.monumentGlowGroup = glowGroup;
-            }
+            const haloGeo = new THREE.RingGeometry(1.16, 1.58, 24);
+            haloGeo.rotateX(-Math.PI / 2);
+            const haloMat = new THREE.MeshBasicMaterial({
+                color: tierBeaconCfg.haloColor,
+                transparent: true,
+                opacity: 0.42,
+                blending: THREE.AdditiveBlending,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            const outerHalo = new THREE.Mesh(haloGeo, haloMat);
+            outerHalo.position.y = 0.08;
+            glowGroup.add(outerHalo);
 
-            const tierShortLabel = {
-                1: "★ Cấp 1 (Dễ)",
-                2: "★★ Cấp 2 (Vừa)",
-                3: "★★★ Cấp 3 (Khó)"
+            const beaconGeo = new THREE.CylinderGeometry(tierBeaconCfg.rTop, tierBeaconCfg.rBot, tierBeaconCfg.height, 12, 1, true);
+            const beaconMat = new THREE.MeshBasicMaterial({
+                color: tierBeaconCfg.color,
+                transparent: true,
+                opacity: tierBeaconCfg.opacity,
+                blending: THREE.AdditiveBlending,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            const beaconMesh = new THREE.Mesh(beaconGeo, beaconMat);
+            beaconMesh.position.y = tierBeaconCfg.height * 0.5 + 0.12;
+            glowGroup.add(beaconMesh);
+
+            glowGroup.userData = {
+                beaconMesh,
+                outerHalo,
+                baseColor: tierBeaconCfg.color,
+                baseOpacity: tierBeaconCfg.opacity,
+                tier,
+                hiddenByState: false
             };
-            const tierColors = { 1: "#10b981", 2: "#fbbf24", 3: "#f87171" };
-            // Zoom-In Full Name Sprite + Zoom-Out Compact Icon Sprite (🏛️)
-            const sprite = ProceduralModels.createLabelCanvas(
-                `🏛️ ${monData.name}`,
-                tierShortLabel[tier],
-                "rgba(15, 23, 42, 0.90)",
-                tierColors[tier],
-                2.55,
-                0.64
-            );
-            sprite.position.set(0, surfaceY + 4.45, 0);
-            group.add(sprite);
-            tileObj.labelSprite = sprite;
+            group.add(glowGroup);
+            tileObj.monumentGlowGroup = glowGroup;
 
-            const iconSprite = ProceduralModels.createCompactPOIIconSprite("🏛️", tierColors[tier], 1.28);
-            iconSprite.position.set(0, surfaceY + 4.35, 0);
-            group.add(iconSprite);
-            tileObj.iconSprite = iconSprite;
+            // Crisp 2D HTML Monument Label (replaces blurry 3D CanvasTexture sprite)
+            tileObj.labelSprite = null;
+            tileObj.iconSprite = null;
+            this.setMonumentHtmlLabel(tileObj, { mode: "active" });
 
         } else if (spec.isPort) {
             const portModel = ProceduralModels.createTradePortModel(region.color, spec.regionId);
             portModel.position.y = surfaceY;
             group.add(portModel);
             tileObj.propModel = portModel;
+            tileObj.portSpecialtyLabel = `${region.specialty.icon} ${region.specialty.shortName}`;
+            tileObj.portVisualKey = "free|||0";
 
-            // Cyan Emissive Base Rim for Trade Ports
-            addPOIEmissiveRim(0x22d3ee, 0x06b6d4);
+            // Emissive Base Rim for Trade Ports (dynamically recolored by Charter Owner!)
+            addPOIEmissiveRim(0x38bdf8, 0x0284c7);
 
-            // Zoom-In Full Name Sprite + Zoom-Out Compact Icon Sprite (⚓)
-            const sprite = ProceduralModels.createLabelCanvas(
-                `⚓ ${spec.portName}`,
-                `${region.specialty.icon} ${region.specialty.shortName}`,
-                "rgba(15, 23, 42, 0.90)",
-                "#22d3ee",
-                2.40,
-                0.58
-            );
-            sprite.position.set(0, surfaceY + 3.25, 0);
-            group.add(sprite);
-            tileObj.labelSprite = sprite;
+            // Wide Sea Halo Ring + Gold Outer Accent Ring (for player's own port) + Vertical Lighthouse Beam (zero PointLight!)
+            const portGlowGroup = new THREE.Group();
+            portGlowGroup.position.y = surfaceY;
 
-            const iconSprite = ProceduralModels.createCompactPOIIconSprite("⚓", "#22d3ee", 1.20);
-            iconSprite.position.set(0, surfaceY + 3.15, 0);
-            group.add(iconSprite);
-            tileObj.iconSprite = iconSprite;
+            const seaHaloGeo = new THREE.RingGeometry(1.42, 1.92, 28);
+            seaHaloGeo.rotateX(-Math.PI / 2);
+            const seaHaloMat = new THREE.MeshBasicMaterial({
+                color: 0x38bdf8,
+                transparent: true,
+                opacity: 0.42,
+                blending: THREE.AdditiveBlending,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            const seaHalo = new THREE.Mesh(seaHaloGeo, seaHaloMat);
+            seaHalo.position.y = 0.07;
+            portGlowGroup.add(seaHalo);
+
+            const goldOuterGeo = new THREE.RingGeometry(1.92, 2.12, 28);
+            goldOuterGeo.rotateX(-Math.PI / 2);
+            const goldOuterMat = new THREE.MeshBasicMaterial({
+                color: 0xfde047,
+                transparent: true,
+                opacity: 0.56,
+                blending: THREE.AdditiveBlending,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            const goldOuterHalo = new THREE.Mesh(goldOuterGeo, goldOuterMat);
+            goldOuterHalo.position.y = 0.09;
+            goldOuterHalo.visible = false;
+            portGlowGroup.add(goldOuterHalo);
+
+            const portBeaconGeo = new THREE.CylinderGeometry(0.15, 0.52, 5.2, 12, 1, true);
+            const portBeaconMat = new THREE.MeshBasicMaterial({
+                color: 0x38bdf8,
+                transparent: true,
+                opacity: 0.15,
+                blending: THREE.AdditiveBlending,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            const portBeaconMesh = new THREE.Mesh(portBeaconGeo, portBeaconMat);
+            portBeaconMesh.position.y = 2.72;
+            portGlowGroup.add(portBeaconMesh);
+
+            portGlowGroup.userData = {
+                seaHalo,
+                goldOuterHalo,
+                beaconMesh: portBeaconMesh,
+                mode: "free",
+                baseOpacity: 0.15
+            };
+            group.add(portGlowGroup);
+            tileObj.portGlowGroup = portGlowGroup;
+
+            // Crisp 2D HTML Trade Port Label (replaces blurry 3D CanvasTexture sprite)
+            tileObj.labelSprite = null;
+            tileObj.iconSprite = null;
+            this.setPortHtmlLabel(tileObj, { mode: "free" });
 
         } else if (spec.resourceType) {
             const resModel = ProceduralModels.createResourceNodeModel(spec.resourceType);
@@ -1936,6 +2986,7 @@ class World3D {
     spawnShips(players, localPlayer = null) {
         this.shipMeshes.forEach(mesh => this.scene.remove(mesh));
         this.shipMeshes.clear();
+        this.clearHtmlLabels("ship");
 
         const localKey = localPlayer ? World3D.getPlayerShipKey(localPlayer) : null;
         if (localKey) {
@@ -1961,6 +3012,22 @@ class World3D {
             this.scene.add(shipMesh);
             this.shipMeshes.set(shipKey, shipMesh);
             this.placeShipOnHexImmediate(p, p.q, p.r, idx, players.length);
+
+            // Crisp 2D HTML Ship Name Label glued above mast (Player Name ONLY)
+            const shipCol = p.color || "#38bdf8";
+            const shipHtml = `<span class="map-lbl-dot" style="background:${shipCol}"></span><span>${p.name}</span>`;
+            const shipEntry = this.registerHtmlLabel(
+                `ship_${shipKey}`,
+                "ship",
+                `map-lbl-ship ${isLocal ? 'is-local' : ''}`,
+                shipHtml,
+                null,
+                shipMesh,
+                3.25
+            );
+            if (shipEntry && shipEntry.el && shipEntry.el.style && typeof shipEntry.el.style.setProperty === "function") {
+                shipEntry.el.style.setProperty("--ship-color", shipCol);
+            }
         });
         this.applyMinimalistMode();
     }
@@ -2017,6 +3084,10 @@ class World3D {
         const dockPos = this.getShipDockPositionOnTile(tile, player, playerIdx, totalPlayers);
         shipMesh.position.copy(dockPos);
         shipMesh.userData.dockBaseY = dockPos.y;
+        // At initial match spawn (before first move), orient ship bow toward the open sea (+X East)
+        if (!shipMesh.userData.hasMovedYet) {
+            shipMesh.rotation.y = Math.PI / 2;
+        }
     }
 
     animateShipAlongPath(player, pathTiles, playerIdx = 0, totalPlayers = 1, onComplete = null) {
@@ -2145,50 +3216,336 @@ class World3D {
         requestAnimationFrame(step);
     }
 
+    createPathDestinationBadgeSprite(meta, isCustomDrawn = false) {
+        if (typeof document === "undefined") return null;
+        const canvas = document.createElement("canvas");
+        const lines = [];
+        const steps = meta.steps || 0;
+        const apText = meta.isInfiniteMove ? "♾️ 0 AP" : `-${meta.apCost || 0} ⚡AP`;
+        lines.push({
+            text: `⛵ ${steps} ô • ${apText}`,
+            color: "#ffffff",
+            font: "900 32px 'Segoe UI', Roboto, sans-serif"
+        });
+        if ((meta.reefHits || 0) > 0) {
+            lines.push({
+                text: `⚠️ CHẠM ĐÁ NGẦM (-${meta.reefHits} ❤️)`,
+                color: "#ff6b6b",
+                font: "900 26px 'Segoe UI', Roboto, sans-serif"
+            });
+        }
+        if (meta.portTaxMode === "blocked0") {
+            lines.push({
+                text: "⛔ Thiếu 1 Xu thuế",
+                color: "#fca5a5",
+                font: "900 25px 'Segoe UI', Roboto, sans-serif"
+            });
+        } else if (meta.portTaxMode === "pay1") {
+            lines.push({
+                text: "💰 Thuế cảng: 1 Xu",
+                color: "#fde047",
+                font: "800 25px 'Segoe UI', Roboto, sans-serif"
+            });
+        }
+        if (meta.isLocked) {
+            lines.push({
+                text: "✅ Bấm lại ô này để đi • Chuột phải: Hủy",
+                color: "#86efac",
+                font: "900 23px 'Segoe UI', Roboto, sans-serif"
+            });
+        }
+
+        canvas.width = meta.isLocked ? 620 : 520;
+        canvas.height = 76 + (lines.length - 1) * 44;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return null;
+
+        const hasDanger = (meta.reefHits || 0) > 0 || meta.portTaxMode === "blocked0";
+        const borderHex = hasDanger ? "#ff2e2e" : (isCustomDrawn ? "#4ade80" : "#fde047");
+
+        const x = 14, y = 10, w = canvas.width - 28, h = canvas.height - 20;
+        ctx.save();
+        ctx.shadowColor = "rgba(0, 0, 0, 0.85)";
+        ctx.shadowBlur = 12;
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, 18);
+        ctx.fillStyle = "rgba(11, 22, 42, 0.96)";
+        ctx.fill();
+        ctx.restore();
+
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, 18);
+        ctx.lineWidth = 6;
+        ctx.strokeStyle = borderHex;
+        ctx.stroke();
+
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.shadowColor = "rgba(0, 0, 0, 0.92)";
+        ctx.shadowBlur = 5;
+
+        lines.forEach((ln, idx) => {
+            const cy = y + 32 + idx * 42;
+            ctx.font = ln.font;
+            ctx.fillStyle = ln.color;
+            ctx.fillText(ln.text, canvas.width / 2, cy, w - 30);
+        });
+
+        const texture = new THREE.CanvasTexture(canvas);
+        if (typeof ProceduralModels !== "undefined" && ProceduralModels.configureSharpCanvasTexture) {
+            ProceduralModels.configureSharpCanvasTexture(texture, false);
+        } else {
+            texture.needsUpdate = true;
+        }
+        const spriteMat = new THREE.SpriteMaterial({
+            map: texture,
+            transparent: true,
+            depthTest: false,
+            depthWrite: false
+        });
+        const sprite = new THREE.Sprite(spriteMat);
+        const aspect = canvas.width / canvas.height;
+        const scaleH = 0.56 + (lines.length - 1) * 0.28;
+        sprite.scale.set(scaleH * aspect, scaleH, 1);
+        sprite.renderOrder = 998;
+        return sprite;
+    }
+
     showPathPreview(pathTiles, isCustomDrawn = false) {
         this.clearPathPreview();
         if (!pathTiles || pathTiles.length === 0) return;
 
-        const accentColor = isCustomDrawn ? 0x10b981 : 0xfbbf24;
-        const points = [];
-        pathTiles.forEach((t, idx) => {
-            const py = t.height + 0.30;
-            points.push(new THREE.Vector3(t.x, py, t.z));
-            const dot = new THREE.Mesh(
-                new THREE.SphereGeometry(isCustomDrawn ? 0.24 : 0.18, 12, 12),
-                new THREE.MeshBasicMaterial({ color: accentColor })
-            );
-            dot.position.set(t.x, py, t.z);
-            this.pathPreviewGroup.add(dot);
+        // Fetch enriched path metadata (start tile, AP cost, reef hits, port tax, valid drag neighbors)
+        const meta = (typeof this.getPathPreviewMeta === "function")
+            ? this.getPathPreviewMeta(pathTiles, isCustomDrawn)
+            : {
+                fullPath: pathTiles,
+                steps: Math.max(0, pathTiles.length - 1),
+                apCost: Math.ceil(Math.max(0, pathTiles.length - 1) / 2),
+                isInfiniteMove: false,
+                reefHits: pathTiles.slice(1).filter(t => t && t.isReef).length,
+                portTaxMode: "none",
+                nextNeighbors: []
+            };
 
-            if (idx > 0 || isCustomDrawn) {
-                const ringGeo = new THREE.RingGeometry(0.45, 0.72, 6);
-                ringGeo.rotateX(-Math.PI / 2);
-                ringGeo.rotateY(Math.PI / 6);
-                const ringMat = new THREE.MeshBasicMaterial({
-                    color: accentColor,
-                    side: THREE.DoubleSide,
+        const fullPath = (meta && meta.fullPath && meta.fullPath.length > 0) ? meta.fullPath : pathTiles;
+        const mainColor = isCustomDrawn ? 0x4ade80 : 0xfde047;
+        const outlineColor = isCustomDrawn ? 0x052e16 : 0x0f172a;
+        const dangerColor = 0xff2e2e;
+        const dangerOutline = 0x450a0a;
+
+        const animItems = { chevrons: [], targetOuterRing: null, targetCenterDot: null };
+        let chevronCounter = 0;
+
+        const baseY = (tile) => Math.max(tile && typeof tile.height === "number" ? tile.height : 0, 0) + 0.48;
+
+        // 1. Valid next adjacent hex hints while custom dragging
+        if (isCustomDrawn && meta && Array.isArray(meta.nextNeighbors) && meta.nextNeighbors.length > 0) {
+            meta.nextNeighbors.forEach(nb => {
+                const nbColor = nb.isReef ? dangerColor : 0x4ade80;
+                const nbGeo = new THREE.RingGeometry(0.84, 0.96, 6);
+                nbGeo.rotateX(-Math.PI / 2);
+                nbGeo.rotateY(Math.PI / 6);
+                const nbMat = new THREE.MeshBasicMaterial({
+                    color: nbColor,
                     transparent: true,
-                    opacity: isCustomDrawn ? 0.90 : 0.65
+                    opacity: nb.isReef ? 0.55 : 0.44,
+                    side: THREE.DoubleSide,
+                    depthWrite: false
                 });
-                const ringMesh = new THREE.Mesh(ringGeo, ringMat);
-                ringMesh.position.set(t.x, t.height + 0.12, t.z);
+                const nbMesh = new THREE.Mesh(nbGeo, nbMat);
+                nbMesh.position.set(nb.x, baseY(nb) - 0.03, nb.z);
+                nbMesh.renderOrder = 845;
+                this.pathPreviewGroup.add(nbMesh);
+            });
+        }
+
+        // 2. Connected Wide Ribbon + Dark Contrast Underlay + Directional Chevrons between consecutive hexes
+        for (let i = 0; i < fullPath.length - 1; i++) {
+            const a = fullPath[i];
+            const b = fullPath[i + 1];
+            if (!a || !b) continue;
+
+            const isDangerSeg = Boolean(b.isReef);
+            const segColor = isDangerSeg ? dangerColor : mainColor;
+            const segOutline = isDangerSeg ? dangerOutline : outlineColor;
+
+            const dx = b.x - a.x;
+            const dz = b.z - a.z;
+            const segLen = Math.hypot(dx, dz);
+            if (segLen < 0.05) continue;
+
+            const midX = (a.x + b.x) * 0.5;
+            const midZ = (a.z + b.z) * 0.5;
+            const segY = Math.max(baseY(a), baseY(b));
+            const yaw = Math.atan2(dx, dz);
+
+            // Dark contrast underlay ribbon (visible even in bright Sun / Sunset)
+            const underGeo = new THREE.PlaneGeometry(0.62, segLen);
+            underGeo.rotateX(-Math.PI / 2);
+            const underMat = new THREE.MeshBasicMaterial({
+                color: segOutline,
+                transparent: true,
+                opacity: 0.68,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            const underMesh = new THREE.Mesh(underGeo, underMat);
+            underMesh.position.set(midX, segY - 0.02, midZ);
+            underMesh.rotation.y = yaw;
+            underMesh.renderOrder = 850;
+            this.pathPreviewGroup.add(underMesh);
+
+            // Main bright ribbon strip (width 0.44)
+            const stripGeo = new THREE.PlaneGeometry(0.44, segLen);
+            stripGeo.rotateX(-Math.PI / 2);
+            const stripMat = new THREE.MeshBasicMaterial({
+                color: segColor,
+                transparent: true,
+                opacity: 0.92,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            const stripMesh = new THREE.Mesh(stripGeo, stripMat);
+            stripMesh.position.set(midX, segY + 0.01, midZ);
+            stripMesh.rotation.y = yaw;
+            stripMesh.renderOrder = 852;
+            this.pathPreviewGroup.add(stripMesh);
+
+            // Directional triangle Chevrons pointing from A -> B
+            const chevFractions = [0.34, 0.68];
+            chevFractions.forEach(frac => {
+                const cx = a.x + dx * frac;
+                const cz = a.z + dz * frac;
+                // CircleGeometry(r, 3) has a vertex at +X; rotate flat so tip points along +Z before applying yaw
+                const chevGeo = new THREE.CircleGeometry(0.24, 3);
+                chevGeo.rotateX(-Math.PI / 2);
+                chevGeo.rotateY(-Math.PI / 2);
+                const chevMat = new THREE.MeshBasicMaterial({
+                    color: isDangerSeg ? 0xffe4e6 : 0xffffff,
+                    transparent: true,
+                    opacity: 0.92,
+                    side: THREE.DoubleSide,
+                    depthWrite: false
+                });
+                const chevMesh = new THREE.Mesh(chevGeo, chevMat);
+                chevMesh.position.set(cx, segY + 0.04, cz);
+                chevMesh.rotation.y = yaw;
+                chevMesh.renderOrder = 856;
+                this.pathPreviewGroup.add(chevMesh);
+                animItems.chevrons.push({ mesh: chevMesh, orderIdx: chevronCounter++ });
+            });
+        }
+
+        // 3. Intermediate Waypoint Rings & Final 2-Layer Target Reticle
+        const lastIdx = fullPath.length - 1;
+        fullPath.forEach((t, idx) => {
+            if (!t) return;
+            const ty = baseY(t);
+            const isDangerHex = Boolean(t.isReef) && idx > 0;
+            const nodeColor = isDangerHex ? dangerColor : mainColor;
+            const nodeOutline = isDangerHex ? dangerOutline : outlineColor;
+
+            if (idx > 0 && idx < lastIdx) {
+                // Intermediate hex: dark backing + bright circular ring + center dot
+                const backGeo = new THREE.RingGeometry(0.30, 0.62, 20);
+                backGeo.rotateX(-Math.PI / 2);
+                const backMesh = new THREE.Mesh(
+                    backGeo,
+                    new THREE.MeshBasicMaterial({ color: nodeOutline, transparent: true, opacity: 0.68, side: THREE.DoubleSide, depthWrite: false })
+                );
+                backMesh.position.set(t.x, ty - 0.01, t.z);
+                backMesh.renderOrder = 858;
+                this.pathPreviewGroup.add(backMesh);
+
+                const ringGeo = new THREE.RingGeometry(0.36, 0.56, 20);
+                ringGeo.rotateX(-Math.PI / 2);
+                const ringMesh = new THREE.Mesh(
+                    ringGeo,
+                    new THREE.MeshBasicMaterial({ color: nodeColor, transparent: true, opacity: 0.96, side: THREE.DoubleSide, depthWrite: false })
+                );
+                ringMesh.position.set(t.x, ty + 0.02, t.z);
+                ringMesh.renderOrder = 860;
                 this.pathPreviewGroup.add(ringMesh);
+
+                const dotGeo = new THREE.CircleGeometry(0.16, 16);
+                dotGeo.rotateX(-Math.PI / 2);
+                const dotMesh = new THREE.Mesh(
+                    dotGeo,
+                    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.96, side: THREE.DoubleSide, depthWrite: false })
+                );
+                dotMesh.position.set(t.x, ty + 0.03, t.z);
+                dotMesh.renderOrder = 862;
+                this.pathPreviewGroup.add(dotMesh);
+            } else if (idx === lastIdx && (meta.steps > 0 || isCustomDrawn)) {
+                // Final Destination Hex: 2-Layer Rotating Target Reticle + Bright Center Dot
+                const destDanger = Boolean(t.isReef) || (meta && meta.portTaxMode === "blocked0");
+                const reticleColor = destDanger ? dangerColor : mainColor;
+                const reticleOutline = destDanger ? dangerOutline : outlineColor;
+
+                const backGeo = new THREE.RingGeometry(0.62, 0.96, 6);
+                backGeo.rotateX(-Math.PI / 2);
+                const backMesh = new THREE.Mesh(
+                    backGeo,
+                    new THREE.MeshBasicMaterial({ color: reticleOutline, transparent: true, opacity: 0.72, side: THREE.DoubleSide, depthWrite: false })
+                );
+                backMesh.position.set(t.x, ty, t.z);
+                backMesh.renderOrder = 864;
+                this.pathPreviewGroup.add(backMesh);
+
+                const outerGeo = new THREE.RingGeometry(0.68, 0.90, 6);
+                outerGeo.rotateX(-Math.PI / 2);
+                const outerMesh = new THREE.Mesh(
+                    outerGeo,
+                    new THREE.MeshBasicMaterial({ color: reticleColor, transparent: true, opacity: 0.98, side: THREE.DoubleSide, depthWrite: false })
+                );
+                outerMesh.position.set(t.x, ty + 0.03, t.z);
+                outerMesh.renderOrder = 868;
+                this.pathPreviewGroup.add(outerMesh);
+                animItems.targetOuterRing = outerMesh;
+
+                const innerDotGeo = new THREE.CircleGeometry(0.24, 18);
+                innerDotGeo.rotateX(-Math.PI / 2);
+                const innerDotMesh = new THREE.Mesh(
+                    innerDotGeo,
+                    new THREE.MeshBasicMaterial({ color: destDanger ? 0xffe4e6 : 0xffffff, transparent: true, opacity: 0.98, side: THREE.DoubleSide, depthWrite: false })
+                );
+                innerDotMesh.position.set(t.x, ty + 0.04, t.z);
+                innerDotMesh.renderOrder = 870;
+                this.pathPreviewGroup.add(innerDotMesh);
+                animItems.targetCenterDot = innerDotMesh;
+
+                // Floating Sprite Badge above destination hex (Steps + AP + Reef/Tax warnings)
+                if (meta && meta.steps > 0) {
+                    const badge = this.createPathDestinationBadgeSprite(meta, isCustomDrawn);
+                    if (badge) {
+                        badge.position.set(t.x, ty + 1.55, t.z);
+                        this.pathPreviewGroup.add(badge);
+                    }
+                }
             }
         });
 
-        if (points.length >= 2) {
-            const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
-            const lineMat = new THREE.LineBasicMaterial({ color: accentColor, linewidth: 3 });
-            const line = new THREE.Line(lineGeo, lineMat);
-            this.pathPreviewGroup.add(line);
-        }
+        this.pathPreviewAnimItems = animItems;
     }
 
     clearPathPreview() {
         while (this.pathPreviewGroup.children.length > 0) {
-            this.pathPreviewGroup.remove(this.pathPreviewGroup.children[0]);
+            const child = this.pathPreviewGroup.children[0];
+            this.pathPreviewGroup.remove(child);
+            if (child.geometry && typeof child.geometry.dispose === "function") {
+                child.geometry.dispose();
+            }
+            if (child.material) {
+                if (child.material.map && typeof child.material.map.dispose === "function") {
+                    child.material.map.dispose();
+                }
+                if (typeof child.material.dispose === "function") {
+                    child.material.dispose();
+                }
+            }
         }
+        this.pathPreviewAnimItems = null;
     }
 
     // (spawnWakeParticle is now object-pooled above in initWakePool)
@@ -2260,40 +3617,235 @@ class World3D {
         });
     }
 
+    getSharedStormMineAssets() {
+        if (this._stormMineAssets) return this._stormMineAssets;
+        const outerRingGeo = new THREE.RingGeometry(1.26, 1.54, 24);
+        outerRingGeo.rotateX(-Math.PI / 2);
+        const innerRingGeo = new THREE.RingGeometry(1.06, 1.25, 24);
+        innerRingGeo.rotateX(-Math.PI / 2);
+        const cloudPuffGeo = (typeof THREE.DodecahedronGeometry !== "undefined")
+            ? new THREE.DodecahedronGeometry(0.32, 0)
+            : new THREE.SphereGeometry(0.32, 6, 6);
+
+        const outerRingMat = new THREE.MeshBasicMaterial({
+            color: 0xe11d48,
+            transparent: true,
+            opacity: 0.78,
+            side: THREE.DoubleSide,
+            depthWrite: false
+        });
+        const innerRingMat = new THREE.MeshBasicMaterial({
+            color: 0x9333ea,
+            transparent: true,
+            opacity: 0.62,
+            side: THREE.DoubleSide,
+            depthWrite: false
+        });
+        const cloudMat = new THREE.MeshLambertMaterial({
+            color: 0x1e293b,
+            emissive: 0x3b0764,
+            emissiveIntensity: 0.35,
+            flatShading: true
+        });
+        this._stormMineAssets = { outerRingGeo, innerRingGeo, cloudPuffGeo, outerRingMat, innerRingMat, cloudMat };
+        return this._stormMineAssets;
+    }
+
     updateResourceVisuals() {
         this.hexTiles.forEach(tile => {
             if (tile.resourceType && tile.propModel) {
                 const depleted = tile.resourceCooldown > 0;
                 tile.propModel.position.y = (tile.height - 0.1) - (depleted ? 0.12 : 0);
 
-                // Thunderstorm restriction indicator ("Một số ô khai thác tài nguyên bị hạn chế không thể vào")
-                if (tile.stormRestricted && !tile.stormRestrictGroup) {
-                    const restrictGroup = new THREE.Group();
-                    restrictGroup.position.y = tile.height - 0.06;
-                    const barRingGeo = new THREE.RingGeometry(0.85, 1.35, 24);
-                    barRingGeo.rotateX(-Math.PI / 2);
-                    const barRing = new THREE.Mesh(
-                        barRingGeo,
-                        new THREE.MeshBasicMaterial({ color: 0xef4444, transparent: true, opacity: 0.82, side: THREE.DoubleSide })
+                const stormLabelId = `storm_mine_${tile.q}_${tile.r}`;
+                // Mục 4B: Lightweight 3D Red-Purple Warning Ring + Spinning Dark Storm Cloud + Always-Visible 2D HTML Badge
+                if (tile.stormRestricted) {
+                    if (!tile.stormRestrictGroup) {
+                        const assets = this.getSharedStormMineAssets();
+                        const restrictGroup = new THREE.Group();
+                        restrictGroup.position.y = tile.height + 0.06;
+
+                        const outerRing = new THREE.Mesh(assets.outerRingGeo, assets.outerRingMat);
+                        outerRing.renderOrder = 40;
+                        const innerRing = new THREE.Mesh(assets.innerRingGeo, assets.innerRingMat);
+                        innerRing.position.y = 0.02;
+                        innerRing.renderOrder = 41;
+                        restrictGroup.add(outerRing, innerRing);
+
+                        const cloudCluster = new THREE.Group();
+                        cloudCluster.position.y = 1.92;
+                        const puffOffsets = [
+                            [0, 0.14, 0, 1.15],
+                            [-0.36, 0.0, 0.14, 0.85],
+                            [0.34, -0.02, -0.12, 0.90]
+                        ];
+                        puffOffsets.forEach(([px, py, pz, sc]) => {
+                            const puff = new THREE.Mesh(assets.cloudPuffGeo, assets.cloudMat);
+                            puff.position.set(px, py, pz);
+                            puff.scale.set(sc * 1.25, sc * 0.72, sc);
+                            puff.castShadow = false;
+                            cloudCluster.add(puff);
+                        });
+                        restrictGroup.add(cloudCluster);
+                        restrictGroup.userData = { outerRing, innerRing, cloudCluster };
+
+                        tile.group.add(restrictGroup);
+                        tile.stormRestrictGroup = restrictGroup;
+                    }
+                    // Always-visible 2D HTML warning badge on #map-labels-layer
+                    this.registerHtmlLabel(
+                        stormLabelId,
+                        "storm_mine",
+                        "map-lbl-storm-mine",
+                        "⛈️ PHONG TỎA",
+                        new THREE.Vector3(tile.x, (tile.height || 0.22) + 2.85, tile.z)
                     );
-                    restrictGroup.add(barRing);
-
-                    const crossMat = new THREE.MeshBasicMaterial({ color: 0xef4444 });
-                    const bar1 = new THREE.Mesh(new THREE.BoxGeometry(1.75, 0.08, 0.22), crossMat);
-                    bar1.position.y = 0.45;
-                    bar1.rotation.y = Math.PI / 4;
-                    const bar2 = new THREE.Mesh(new THREE.BoxGeometry(1.75, 0.08, 0.22), crossMat);
-                    bar2.position.y = 0.45;
-                    bar2.rotation.y = -Math.PI / 4;
-                    restrictGroup.add(bar1, bar2);
-
-                    tile.group.add(restrictGroup);
-                    tile.stormRestrictGroup = restrictGroup;
-                } else if (!tile.stormRestricted && tile.stormRestrictGroup) {
-                    tile.group.remove(tile.stormRestrictGroup);
-                    tile.stormRestrictGroup = null;
+                } else {
+                    if (tile.stormRestrictGroup) {
+                        tile.group.remove(tile.stormRestrictGroup);
+                        tile.stormRestrictGroup = null;
+                    }
+                    if (this.htmlLabels && this.htmlLabels.has(stormLabelId)) {
+                        const ent = this.htmlLabels.get(stormLabelId);
+                        if (ent && ent.el && ent.el.parentNode) ent.el.parentNode.removeChild(ent.el);
+                        this.htmlLabels.delete(stormLabelId);
+                    }
                 }
             }
+        });
+    }
+
+    updateMonumentVisuals(earlyLockActive = false, conquerorsMap = {}) {
+        const tierRimPalette = {
+            1: { col: 0x34d399, em: 0x059669 },
+            2: { col: 0xfde047, em: 0xd97706 },
+            3: { col: 0xfb923c, em: 0xdc2626 }
+        };
+
+        this.hexTiles.forEach(tile => {
+            if (!tile.monumentId) return;
+            const tier = tile.monumentTier || 1;
+            const conqueror = (conquerorsMap && conquerorsMap[tile.monumentId]) || tile.monumentConqueror || null;
+
+            let mode = "active";
+            let conquerorName = "";
+            let conquerorColor = "";
+            if (conqueror && conqueror.name) {
+                mode = "conquered";
+                conquerorName = conqueror.name;
+                conquerorColor = conqueror.color || "#34d399";
+            } else if (earlyLockActive && tier >= 2) {
+                mode = "early_locked";
+            }
+
+            const cacheKey = `${mode}|${tier}|${conquerorName}|${conquerorColor}`;
+            if (tile.monumentVisualKey === cacheKey) return;
+            tile.monumentVisualKey = cacheKey;
+
+            // 1. Toggle Light Column & Ground Halo visibility by state
+            if (tile.monumentGlowGroup && tile.monumentGlowGroup.userData) {
+                const gd = tile.monumentGlowGroup.userData;
+                const hideGlow = (mode !== "active");
+                gd.hiddenByState = hideGlow;
+                if (gd.beaconMesh) gd.beaconMesh.visible = !hideGlow;
+                if (gd.outerHalo) gd.outerHalo.visible = !hideGlow;
+            }
+
+            // 2. Update Base Emissive Rim color (conqueror ship color / steel gray / tier color)
+            if (tile.poiEmissiveRim && tile.poiEmissiveRim.material) {
+                if (mode === "conquered") {
+                    const cHex = new THREE.Color(conquerorColor);
+                    tile.poiEmissiveRim.material.color.copy(cHex);
+                    if (tile.poiEmissiveRim.material.emissive) tile.poiEmissiveRim.material.emissive.copy(cHex);
+                } else if (mode === "early_locked") {
+                    tile.poiEmissiveRim.material.color.setHex(0x64748b);
+                    if (tile.poiEmissiveRim.material.emissive) tile.poiEmissiveRim.material.emissive.setHex(0x334155);
+                } else {
+                    const pal = tierRimPalette[tier] || tierRimPalette[1];
+                    tile.poiEmissiveRim.material.color.setHex(pal.col);
+                    if (tile.poiEmissiveRim.material.emissive) tile.poiEmissiveRim.material.emissive.setHex(pal.em);
+                }
+            }
+
+            // 3. Update crisp 2D HTML Monument Label
+            this.setMonumentHtmlLabel(tile, { mode, conquerorName, conquerorColor });
+        });
+    }
+
+    updatePortOwnershipVisuals(portStatesMap = {}) {
+        this.hexTiles.forEach(tile => {
+            if (!tile.isPort) return;
+            const st = portStatesMap[tile.regionId] || { mode: "free", ownerName: "", ownerColor: "#38bdf8", needsCoinWarning: false };
+            const mode = st.mode || "free";
+            const ownerName = st.ownerName || "";
+            const ownerColor = st.ownerColor || "#38bdf8";
+            const needsWarn = st.needsCoinWarning ? "1" : "0";
+            const cacheKey = `${mode}|${ownerName}|${ownerColor}|${needsWarn}`;
+            if (tile.portVisualKey === cacheKey) return;
+            tile.portVisualKey = cacheKey;
+
+            // 1. Sea Halo Ring, Gold Outer Accent & Vertical Lighthouse Beam
+            if (tile.portGlowGroup && tile.portGlowGroup.userData) {
+                const pg = tile.portGlowGroup.userData;
+                pg.mode = mode;
+                if (mode === "mine") {
+                    pg.baseOpacity = 0.21;
+                    if (pg.seaHalo && pg.seaHalo.material) pg.seaHalo.material.color.setHex(0x22c55e);
+                    if (pg.goldOuterHalo) pg.goldOuterHalo.visible = true;
+                    if (pg.beaconMesh && pg.beaconMesh.material) pg.beaconMesh.material.color.setHex(0x22c55e);
+                } else if (mode === "free") {
+                    pg.baseOpacity = 0.15;
+                    if (pg.seaHalo && pg.seaHalo.material) pg.seaHalo.material.color.setHex(0x38bdf8);
+                    if (pg.goldOuterHalo) pg.goldOuterHalo.visible = false;
+                    if (pg.beaconMesh && pg.beaconMesh.material) pg.beaconMesh.material.color.setHex(0x38bdf8);
+                } else {
+                    pg.baseOpacity = 0.16;
+                    const c = new THREE.Color(st.needsCoinWarning ? "#ef4444" : ownerColor);
+                    if (pg.seaHalo && pg.seaHalo.material) pg.seaHalo.material.color.copy(c);
+                    if (pg.goldOuterHalo) pg.goldOuterHalo.visible = false;
+                    if (pg.beaconMesh && pg.beaconMesh.material) pg.beaconMesh.material.color.copy(c);
+                }
+            }
+
+            // 2. Base Emissive Rim Color
+            if (tile.poiEmissiveRim && tile.poiEmissiveRim.material) {
+                if (mode === "mine") {
+                    tile.poiEmissiveRim.material.color.setHex(0x22c55e);
+                    if (tile.poiEmissiveRim.material.emissive) tile.poiEmissiveRim.material.emissive.setHex(0x16a34a);
+                } else if (mode === "free") {
+                    tile.poiEmissiveRim.material.color.setHex(0x38bdf8);
+                    if (tile.poiEmissiveRim.material.emissive) tile.poiEmissiveRim.material.emissive.setHex(0x0284c7);
+                } else {
+                    const c = new THREE.Color(st.needsCoinWarning ? "#ef4444" : ownerColor);
+                    tile.poiEmissiveRim.material.color.copy(c);
+                    if (tile.poiEmissiveRim.material.emissive) tile.poiEmissiveRim.material.emissive.copy(c);
+                }
+            }
+
+            // 3. Harbor Flagpole Flag Color (Mine = own ship color, Free = white & blue, Other = owner ship color)
+            if (tile.propModel && tile.propModel.userData && tile.propModel.userData.ownerFlagMat) {
+                const ud = tile.propModel.userData;
+                if (mode === "free") {
+                    ud.ownerFlagMat.color.setHex(0xffffff);
+                    if (ud.ownerFlagMat.emissive) ud.ownerFlagMat.emissive.setHex(0x38bdf8);
+                    if (ud.ownerFlagAccentMat) {
+                        ud.ownerFlagAccentMat.color.setHex(0x0284c7);
+                        if (ud.ownerFlagAccentMat.emissive) ud.ownerFlagAccentMat.emissive.setHex(0x38bdf8);
+                    }
+                } else {
+                    const shipCol = new THREE.Color(ownerColor);
+                    ud.ownerFlagMat.color.copy(shipCol);
+                    if (ud.ownerFlagMat.emissive) ud.ownerFlagMat.emissive.copy(shipCol);
+                    if (ud.ownerFlagAccentMat) {
+                        const accentCol = mode === "mine" ? new THREE.Color(0xfde047) : new THREE.Color(0xffffff);
+                        ud.ownerFlagAccentMat.color.copy(accentCol);
+                        if (ud.ownerFlagAccentMat.emissive) ud.ownerFlagAccentMat.emissive.copy(accentCol);
+                    }
+                }
+            }
+
+            // 4. Update crisp 2D HTML Trade Port Ownership Label
+            this.setPortHtmlLabel(tile, st);
         });
     }
 
@@ -2424,9 +3976,22 @@ class World3D {
             const h = this.container.clientHeight || window.innerHeight;
             this.camera.aspect = w / h;
             this.camera.updateProjectionMatrix();
+            if (this.lobbyCamera) {
+                this.lobbyCamera.aspect = w / h;
+                this.lobbyCamera.updateProjectionMatrix();
+            }
             this.renderer.setPixelRatio(this.getOptimalPixelRatio());
             this.renderer.setSize(w, h);
         });
+
+        // Smooth pointer parallax input for Golden Sunset Lobby Scene
+        window.addEventListener("pointermove", (ev) => {
+            if (!this.menuOrbitMode) return;
+            const ww = window.innerWidth || 1;
+            const wh = window.innerHeight || 1;
+            this.lobbyMouseX = ((ev.clientX / ww) - 0.5) * 2;
+            this.lobbyMouseY = ((ev.clientY / wh) - 0.5) * 2;
+        }, { passive: true });
 
         let pointerDownPos = { x: 0, y: 0 };
         let pointerDownTile = null;
@@ -2452,12 +4017,35 @@ class World3D {
                     return;
                 }
             }
+            const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+            const activeTag = activeEl ? String(activeEl.tagName || "").toUpperCase() : "";
+            const isTypingInField = Boolean(
+                activeTag === "INPUT" ||
+                activeTag === "TEXTAREA" ||
+                (activeEl && activeEl.isContentEditable)
+            );
+            if (isTypingInField) {
+                if (!isDown) {
+                    this.keyState.w = this.keyState.s = this.keyState.a = this.keyState.d = false;
+                }
+                return;
+            }
             const code = e.code || "";
             const key = (e.key || "").toLowerCase();
             if (code === "KeyW" || key === "w" || code === "ArrowUp") this.keyState.w = isDown;
             if (code === "KeyS" || key === "s" || code === "ArrowDown") this.keyState.s = isDown;
             if (code === "KeyA" || key === "a" || code === "ArrowLeft") this.keyState.a = isDown;
             if (code === "KeyD" || key === "d" || code === "ArrowRight") this.keyState.d = isDown;
+            if (isDown && (code === "Escape" || key === "escape")) {
+                if (this.isPathLocked && this.onCancelLockedPath) {
+                    this.onCancelLockedPath();
+                }
+            }
+            if (isDown && !e.repeat && (code === "KeyL" || key === "l")) {
+                if (typeof window !== "undefined" && window.GAME && typeof window.GAME.cycleMapLabelMode === "function") {
+                    window.GAME.cycleMapLabelMode();
+                }
+            }
         };
         window.addEventListener("keydown", (e) => updateKeyState(e, true));
         window.addEventListener("keyup", (e) => updateKeyState(e, false));
@@ -2488,7 +4076,17 @@ class World3D {
             return firstTile;
         };
 
+        let rightDownPos = null;
+        this.renderer.domElement.addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+        });
+
         this.renderer.domElement.addEventListener("pointerdown", (e) => {
+            // Right-click tracking (< 6px drag = cancel locked path; >= 6px = normal camera orbit)
+            if (e.button === 2) {
+                rightDownPos = { x: e.clientX, y: e.clientY };
+                return;
+            }
             // Only left mouse button / touch triggers hex click & custom path drawing
             if (e.button !== 0) return;
 
@@ -2496,55 +4094,21 @@ class World3D {
             const tile = pickTileAtClientPos(e.clientX, e.clientY);
             pointerDownTile = tile;
             isLeftPointerDown = true;
-            const now = performance.now();
-
-            // If already in click-draw mode (user double-clicked and released, then hovered across tiles),
-            // clicking again commits the drawn path immediately!
-            if (this.isClickDrawMode) {
-                this.isClickDrawMode = false;
-                this.isDrawingCustomPath = false;
-                if (tile && tile.navigable && this.onCustomPathStep) {
-                    this.onCustomPathStep(tile);
-                }
-                if (this.onCustomPathCommit) {
-                    this.onCustomPathCommit();
-                }
-                lastTapTime = 0;
-                return;
-            }
-
-            if (tile && tile.navigable) {
-                // Double-click + hold & drag (or double-click then move) custom path drawing:
-                if ((now - lastTapTime) <= 680 && this.onCustomPathStart) {
-                    clearTimeout(this.singleClickTimer);
-                    this.singleClickTimer = null;
-                    const started = this.onCustomPathStart(tile);
-                    if (started) {
-                        this.isDrawingCustomPath = true;
-                        this.hasDraggedToOtherHex = false;
-                        try {
-                            this.renderer.domElement.setPointerCapture(e.pointerId);
-                        } catch (_) {}
-                        lastTapTime = 0;
-                        return;
-                    }
-                }
-                lastTapTime = now;
-            }
+            this.hasDraggedToOtherHex = false;
         });
 
         this.renderer.domElement.addEventListener("pointermove", (e) => {
             const now = performance.now();
             // Throttle hover raycast to 40ms (30-50ms target) for low CPU usage
-            if (!this.isDrawingCustomPath && !this.isClickDrawMode && !isLeftPointerDown) {
+            if (!this.isDrawingCustomPath && !isLeftPointerDown) {
                 if (now - lastHoverRaycastTime < 40) return;
             }
             lastHoverRaycastTime = now;
 
             const tile = pickTileAtClientPos(e.clientX, e.clientY);
 
-            // A. Active custom path drawing (either holding mouse button or in click-draw mode)
-            if (this.isDrawingCustomPath || this.isClickDrawMode) {
+            // A. Active custom path drawing while holding left mouse button
+            if (this.isDrawingCustomPath) {
                 if (tile && tile.navigable && this.onCustomPathStep) {
                     if (pointerDownTile && (tile.q !== pointerDownTile.q || tile.r !== pointerDownTile.r)) {
                         this.hasDraggedToOtherHex = true;
@@ -2554,16 +4118,17 @@ class World3D {
                 return;
             }
 
-            // B. Direct Left-Click + Drag across hexes also starts custom path drawing if starting on a valid 1-step hex!
+            // B. Hold Left-Click + Drag across navigable hexes starts custom manual path drawing
             if (isLeftPointerDown && pointerDownTile && pointerDownTile.navigable && tile && tile.navigable) {
                 const moveDist = Math.hypot(e.clientX - pointerDownPos.x, e.clientY - pointerDownPos.y);
                 if ((tile.q !== pointerDownTile.q || tile.r !== pointerDownTile.r) && moveDist > 14 && this.onCustomPathStart) {
-                    clearTimeout(this.singleClickTimer);
-                    this.singleClickTimer = null;
                     const started = this.onCustomPathStart(pointerDownTile);
                     if (started) {
                         this.isDrawingCustomPath = true;
                         this.hasDraggedToOtherHex = true;
+                        try {
+                            this.renderer.domElement.setPointerCapture(e.pointerId);
+                        } catch (_) {}
                         if (this.onCustomPathStep) {
                             this.onCustomPathStep(tile);
                         }
@@ -2586,13 +4151,18 @@ class World3D {
                     if (isReachable) {
                         tile.highlightRing.material.color.setHex(0x22c55e);
                         tile.highlightRing.material.opacity = 0.85;
-                        this.showPathPreview(this.reachablePaths.get(key).path, false);
+                        // When a path is locked, NEVER overwrite or clear the locked 3D path preview on hover!
+                        if (!this.isPathLocked) {
+                            this.showPathPreview(this.reachablePaths.get(key).path, false);
+                        }
                     } else {
                         tile.highlightRing.material.opacity = 0.0;
-                        this.clearPathPreview();
+                        if (!this.isPathLocked) {
+                            this.clearPathPreview();
+                        }
                     }
 
-                    if (this.onHexHover) this.onHexHover(tile, e.clientX, e.clientY);
+                    if (!this.menuOrbitMode && this.onHexHover) this.onHexHover(tile, e.clientX, e.clientY);
                 }
             } else if (this.hoveredHex) {
                 if (this.hoveredHex.highlightRing) {
@@ -2600,12 +4170,25 @@ class World3D {
                 }
                 this.hoveredHex = null;
                 this.renderer.domElement.style.cursor = "default";
-                this.clearPathPreview();
+                if (!this.isPathLocked) {
+                    this.clearPathPreview();
+                }
                 if (this.onHexHover) this.onHexHover(null, 0, 0);
             }
         });
 
         this.renderer.domElement.addEventListener("pointerup", (e) => {
+            // Right-click (< 6px movement) cancels locked move path without interfering with camera orbit!
+            if (e.button === 2) {
+                if (rightDownPos) {
+                    const rDist = Math.hypot(e.clientX - rightDownPos.x, e.clientY - rightDownPos.y);
+                    rightDownPos = null;
+                    if (rDist < 6 && this.isPathLocked && this.onCancelLockedPath) {
+                        this.onCancelLockedPath();
+                    }
+                }
+                return;
+            }
             if (e.button !== 0) return;
             isLeftPointerDown = false;
             try {
@@ -2614,15 +4197,10 @@ class World3D {
 
             if (this.isDrawingCustomPath) {
                 this.isDrawingCustomPath = false;
-                if (this.hasDraggedToOtherHex) {
-                    // User held the second click and dragged across tiles -> commit immediately on release!
-                    this.isClickDrawMode = false;
-                    if (this.onCustomPathCommit) {
-                        this.onCustomPathCommit();
-                    }
-                } else {
-                    // User did a quick double-click without dragging yet -> stay in click-draw mode so they can move across tiles and click to finish!
-                    this.isClickDrawMode = true;
+                this.isClickDrawMode = false;
+                // Releasing drag LOCKS the drawn custom path (does NOT move ship immediately!)
+                if (this.onCustomPathCommit) {
+                    this.onCustomPathCommit();
                 }
                 return;
             }
@@ -2631,15 +4209,8 @@ class World3D {
             if (moveDist > 28) return;
 
             const tile = pickTileAtClientPos(e.clientX, e.clientY);
-            if (tile && this.onHexClick) {
-                // Delay single-click move by 240ms so the first click of a double-click doesn't immediately move the ship
-                clearTimeout(this.singleClickTimer);
-                this.singleClickTimer = setTimeout(() => {
-                    this.singleClickTimer = null;
-                    if (!this.isDrawingCustomPath && !this.isClickDrawMode) {
-                        this.onHexClick(tile);
-                    }
-                }, 240);
+            if (!this.menuOrbitMode && tile && this.onHexClick) {
+                this.onHexClick(tile);
             }
         });
     }
@@ -2719,6 +4290,14 @@ class World3D {
             const elapsed = this.clock.getElapsedTime();
             const now = performance.now();
             this._frameCount = (this._frameCount || 0) + 1;
+
+            // SHARED SINGLE WebGLRenderer: When on Main Menu / Pre-Match Lobby, render ONLY lobbyScene for locked 60 FPS!
+            if (this.menuOrbitMode && this.lobbyScene && this.lobbyCamera) {
+                this.updateLobbySunsetScene(elapsed, delta);
+                this.renderer.render(this.lobbyScene, this.lobbyCamera);
+                return;
+            }
+
             const isSmoothMode = this.graphicsQuality === "smooth";
             const showWildlife = !this.minimalistMode && !isSmoothMode;
 
@@ -3260,23 +4839,53 @@ class World3D {
                 // C. Animate & fade Monument Sky Beacon, Halo Rings, Orbiting Crystals & Label Sprite
                 if (tile.monumentGlowGroup) {
                     const gd = tile.monumentGlowGroup.userData;
-                    const isLocked = !!tile.monumentLocked;
+                    const isHidden = Boolean(gd.hiddenByState || tile.monumentLocked);
                     if (gd.outerHalo) {
-                        const pulse = 1.0 + Math.sin(elapsed * 3.2 + tile.index) * 0.08;
-                        gd.outerHalo.scale.set(pulse, pulse, 1);
-                        gd.outerHalo.material.opacity = isLocked ? 0.18 : (isOccupied ? 0.22 : (0.58 + Math.sin(elapsed * 3.2 + tile.index) * 0.22));
-                    }
-                    if (gd.innerHalo) {
-                        gd.innerHalo.rotation.z = elapsed * 1.2;
-                        gd.innerHalo.material.opacity = isLocked ? 0.12 : (isOccupied ? 0.18 : (0.50 + Math.cos(elapsed * 2.8 + tile.index) * 0.20));
+                        gd.outerHalo.visible = !isHidden;
+                        if (!isHidden) {
+                            const pulse = 1.0 + Math.sin(elapsed * 2.8 + tile.index) * 0.06;
+                            gd.outerHalo.scale.set(pulse, pulse, 1);
+                            gd.outerHalo.material.opacity = isOccupied ? 0.18 : (0.38 + Math.sin(elapsed * 2.8 + tile.index) * 0.12);
+                        }
                     }
                     if (gd.beaconMesh) {
-                        gd.beaconMesh.material.opacity = isLocked ? 0.04 : (isOccupied ? 0.08 : (0.16 + Math.sin(elapsed * 2.4 + tile.index) * 0.08));
+                        gd.beaconMesh.visible = !isHidden;
+                        if (!isHidden) {
+                            const baseOp = gd.baseOpacity || 0.18;
+                            gd.beaconMesh.material.opacity = isOccupied ? (baseOp * 0.45) : (baseOp + Math.sin(elapsed * 2.2 + tile.index) * 0.035);
+                        }
                     }
-                    if (gd.orbitGroup) {
-                        gd.orbitGroup.visible = !isLocked && !isOccupied;
-                        gd.orbitGroup.rotation.y = elapsed * 1.85 + tile.index;
-                        gd.orbitGroup.position.y = 1.35 + Math.sin(elapsed * 2.5 + tile.index) * 0.15;
+                }
+                if (tile.portGlowGroup && tile.portGlowGroup.userData) {
+                    const pg = tile.portGlowGroup.userData;
+                    const isMine = (pg.mode === "mine");
+                    if (pg.seaHalo) {
+                        const pulse = isMine ? (1.0 + Math.sin(elapsed * 3.2 + tile.index) * 0.075) : (1.0 + Math.sin(elapsed * 1.8 + tile.index) * 0.03);
+                        pg.seaHalo.scale.set(pulse, pulse, 1);
+                        pg.seaHalo.material.opacity = isMine
+                            ? (0.48 + Math.sin(elapsed * 3.2 + tile.index) * 0.18)
+                            : (0.34 + Math.sin(elapsed * 1.8 + tile.index) * 0.08);
+                    }
+                    if (pg.goldOuterHalo && pg.goldOuterHalo.visible) {
+                        const gPulse = 1.0 + Math.sin(elapsed * 3.2 + tile.index) * 0.09;
+                        pg.goldOuterHalo.scale.set(gPulse, gPulse, 1);
+                        pg.goldOuterHalo.material.opacity = 0.54 + Math.sin(elapsed * 3.2 + tile.index) * 0.22;
+                    }
+                    if (pg.beaconMesh) {
+                        const bOp = pg.baseOpacity || 0.15;
+                        pg.beaconMesh.material.opacity = isOccupied ? (bOp * 0.45) : (bOp + Math.sin(elapsed * (isMine ? 3.0 : 1.8) + tile.index) * (isMine ? 0.05 : 0.025));
+                    }
+                }
+                if (tile.propModel && tile.propModel.userData && tile.propModel.userData.flagPivot) {
+                    tile.propModel.userData.flagPivot.rotation.y = Math.sin(elapsed * 2.6 + tile.index) * 0.18;
+                }
+                if (tile.stormRestrictGroup && tile.stormRestrictGroup.userData) {
+                    const sg = tile.stormRestrictGroup.userData;
+                    if (sg.outerRing) sg.outerRing.rotation.y = elapsed * 1.1;
+                    if (sg.innerRing) sg.innerRing.rotation.y = -elapsed * 1.4;
+                    if (sg.cloudCluster) {
+                        sg.cloudCluster.rotation.y = elapsed * 0.85 + tile.index;
+                        sg.cloudCluster.position.y = 1.92 + Math.sin(elapsed * 2.4 + tile.index) * 0.08;
                     }
                 }
                 if (shouldUpdateLabels) {
@@ -3327,6 +4936,31 @@ class World3D {
                 }
             }
             this._hasActiveLabelFade = anyLabelStillFading;
+
+            // 10b. Lightweight Path Preview Chevron Wave & Destination Reticle Animation (Zero Allocations!)
+            if (this.pathPreviewAnimItems) {
+                const pa = this.pathPreviewAnimItems;
+                for (let ci = 0; ci < pa.chevrons.length; ci++) {
+                    const ch = pa.chevrons[ci];
+                    if (ch.mesh && ch.mesh.material) {
+                        const wave = 0.5 + 0.5 * Math.sin(elapsed * 6.4 - ch.orderIdx * 0.85);
+                        ch.mesh.material.opacity = 0.50 + wave * 0.50;
+                    }
+                }
+                if (pa.targetOuterRing) {
+                    pa.targetOuterRing.rotation.y = elapsed * 1.15;
+                }
+                if (pa.targetCenterDot) {
+                    const sc = 1.0 + Math.sin(elapsed * 4.6) * 0.14;
+                    pa.targetCenterDot.scale.set(sc, 1, sc);
+                }
+            }
+
+            // 10c. Crisp 2D HTML Map Labels 3D -> 2D GPU Projection (60 FPS, zero GC)
+            const htmlCamDist = (this.camera && this.controls && typeof this.camera.position.distanceTo === "function")
+                ? this.camera.position.distanceTo(this.controls.target)
+                : 80;
+            this.updateHtmlLabelsProjection(htmlCamDist);
 
             // 11. Object-Pooled V-Shaped Ship Wake Foam Update (Zero Mesh Alloc/Remove!)
             if (this.wakePool) {
@@ -3397,41 +5031,53 @@ class World3D {
                 }
             }
 
-            // 12. WASD / Arrow Keys Camera Panning (Up / Down / Left / Right relative to camera heading)
-            if (this.keyState && (this.keyState.w || this.keyState.s || this.keyState.a || this.keyState.d)) {
-                const moveF = (this.keyState.w ? 1 : 0) - (this.keyState.s ? 1 : 0);
-                const moveR = (this.keyState.d ? 1 : 0) - (this.keyState.a ? 1 : 0);
-                if (moveF !== 0 || moveR !== 0) {
-                    const fx = this.controls.target.x - this.camera.position.x;
-                    const fz = this.controls.target.z - this.camera.position.z;
-                    const fLen = Math.hypot(fx, fz) || 1;
-                    const dirX = fx / fLen;
-                    const dirZ = fz / fLen;
-                    const rightX = -dirZ;
-                    const rightZ = dirX;
-                    const panSpeed = 42 * delta;
-                    const dx = (dirX * moveF + rightX * moveR) * panSpeed;
-                    const dz = (dirZ * moveF + rightZ * moveR) * panSpeed;
-                    const maxBound = 75;
-                    this.controls.target.x = Math.max(-maxBound, Math.min(maxBound, this.controls.target.x + dx));
-                    this.controls.target.z = Math.max(-maxBound, Math.min(maxBound, this.controls.target.z + dz));
-                    this.camera.position.x += dx;
-                    this.camera.position.z += dz;
+            // 12 & 13. Main Menu Scenic Auto-Orbit OR In-Match Camera Pan / Follow Lock
+            if (this.menuOrbitMode) {
+                this.menuOrbitAngle += delta * 0.095;
+                const orbitRadius = 74;
+                const centerX = 0;
+                const centerZ = 2;
+                this.camera.position.x = centerX + Math.sin(this.menuOrbitAngle) * orbitRadius;
+                this.camera.position.z = centerZ + Math.cos(this.menuOrbitAngle) * orbitRadius;
+                this.camera.position.y = 54 + Math.sin(this.menuOrbitAngle * 0.7) * 4;
+                this.controls.target.set(centerX, 0, centerZ);
+            } else {
+                // 12. WASD / Arrow Keys Camera Panning (Up / Down / Left / Right relative to camera heading)
+                if (this.keyState && (this.keyState.w || this.keyState.s || this.keyState.a || this.keyState.d)) {
+                    const moveF = (this.keyState.w ? 1 : 0) - (this.keyState.s ? 1 : 0);
+                    const moveR = (this.keyState.d ? 1 : 0) - (this.keyState.a ? 1 : 0);
+                    if (moveF !== 0 || moveR !== 0) {
+                        const fx = this.controls.target.x - this.camera.position.x;
+                        const fz = this.controls.target.z - this.camera.position.z;
+                        const fLen = Math.hypot(fx, fz) || 1;
+                        const dirX = fx / fLen;
+                        const dirZ = fz / fLen;
+                        const rightX = -dirZ;
+                        const rightZ = dirX;
+                        const panSpeed = 42 * delta;
+                        const dx = (dirX * moveF + rightX * moveR) * panSpeed;
+                        const dz = (dirZ * moveF + rightZ * moveR) * panSpeed;
+                        const maxBound = 75;
+                        this.controls.target.x = Math.max(-maxBound, Math.min(maxBound, this.controls.target.x + dx));
+                        this.controls.target.z = Math.max(-maxBound, Math.min(maxBound, this.controls.target.z + dz));
+                        this.camera.position.x += dx;
+                        this.camera.position.z += dz;
+                    }
                 }
-            }
 
-            // 13. Smooth Camera Follow Lock ("Thêm nút khóa góc nhìn để có thể tự di theo thuyền")
-            if (this.cameraLockEnabled && this.cameraLockShipKey) {
-                const lockedShip = this.shipMeshes.get(this.cameraLockShipKey);
-                if (lockedShip) {
-                    const dx = lockedShip.position.x - this.controls.target.x;
-                    const dz = lockedShip.position.z - this.controls.target.z;
-                    if (Math.hypot(dx, dz) > 0.005) {
-                        const lerpFactor = Math.min(1, delta * 9.5);
-                        this.controls.target.x += dx * lerpFactor;
-                        this.controls.target.z += dz * lerpFactor;
-                        this.camera.position.x += dx * lerpFactor;
-                        this.camera.position.z += dz * lerpFactor;
+                // 13. Smooth Camera Follow Lock ("Thêm nút khóa góc nhìn để có thể tự di theo thuyền")
+                if (this.cameraLockEnabled && this.cameraLockShipKey) {
+                    const lockedShip = this.shipMeshes.get(this.cameraLockShipKey);
+                    if (lockedShip) {
+                        const dx = lockedShip.position.x - this.controls.target.x;
+                        const dz = lockedShip.position.z - this.controls.target.z;
+                        if (Math.hypot(dx, dz) > 0.005) {
+                            const lerpFactor = Math.min(1, delta * 9.5);
+                            this.controls.target.x += dx * lerpFactor;
+                            this.controls.target.z += dz * lerpFactor;
+                            this.camera.position.x += dx * lerpFactor;
+                            this.camera.position.z += dz * lerpFactor;
+                        }
                     }
                 }
             }

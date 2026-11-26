@@ -44,15 +44,33 @@ class GoldenJourneyGame {
         // 45-Minute In-Game Clock & Automatic Phased Weather Engine
         this.matchElapsedSec = 0;
         this.earlyLockReleased = Boolean(this.sandboxMode);
+        this.exhaustedTiersNotified = new Set();
+        this.blockedMineIds = [];
+        this.finalFiveMinNotified = false;
+        this.sprint12NotifiedIds = new Set();
+        this.sandboxAllowTimeout = false;
+        // Mục 4D: Chống AFK 50s (45s + 5s cảnh báo), Đóng băng đồng hồ 45:00 & Tự chuyển lượt 5s khi 0 AP
+        this.lastInteractionAt = Date.now();
+        this.lastGameplayActionAt = Date.now();
+        this.isMatchClockFrozen = false;
+        this.afkWarningRemainingSec = null;
+        this.afkAutoNoticeShown = false;
+        this.afkAutoNoticeShownAt = 0;
+        this.hideAfkAutoNotice();
+        this.zeroApCountdownSec = null;
+        this.zeroApCountdownInterval = null;
         this.currentWeatherPhase = "sunny";
         this.weatherClockInterval = null;
         this.thunderstormChallengeTriggered = false;
         this.stormReadingTimerInterval = null;
         this.activePendingQuiz = null;
         this.activeQuizTimerInterval = null;
+        this.exhaustedTiersNotified = new Set();
         this.tickerCollapsed = false;
 
         // Manual Custom Drag-Path State (Double-click + Hold-drag to steer around Reefs)
+        this.lockedMovePath = null;
+        if (this.world) this.world.isPathLocked = false;
         this.customDrawnPath = [];
         this.selectedRuleCategory = "overview";
 
@@ -112,6 +130,18 @@ class GoldenJourneyGame {
         this.openRoomsPollTimer = null;
         this.cleanUIMode = false;
 
+        // Real-Time Room Chat State (Lobby + In-Match SSE + Sandbox Local)
+        this.roomChatMessages = [];
+        this.roomChatSeenIds = new Set();
+        this.roomChatUnreadCount = 0;
+        this.isInMatchChatOpen = false;
+        this.chatEventSource = null;
+        this.chatStreamRoomCode = null;
+        this.lastChatSentAt = 0;
+        this.chatConsecutiveCount = 0;
+        this.chatSpamCooldownUntil = 0;
+        this.chatSpamTimer = null;
+
         // Cross-tab instant synchronization channel
         try {
             this.roomChannel = new BroadcastChannel("golden_journey_v3_room");
@@ -134,6 +164,9 @@ class GoldenJourneyGame {
             this.world.onCustomPathStart = (tile) => this.startCustomPathDrag(tile);
             this.world.onCustomPathStep = (tile) => this.stepCustomPathDrag(tile);
             this.world.onCustomPathCommit = () => this.commitCustomPathDrag();
+            this.world.getPathPreviewMeta = (pathTiles, isCustomDrawn) => this.buildPathPreviewMeta(pathTiles, isCustomDrawn);
+            this.world.onCancelLockedPath = () => this.cancelLockedMovePath(true);
+            this.lockedMovePath = null;
             this.world.buildBoard(this.monumentAssignments);
             this.world.startRenderLoop();
         } catch (err) {
@@ -148,14 +181,18 @@ class GoldenJourneyGame {
         const sessionRoomCode = (sessionStorage.getItem("golden_active_room_code") || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
         this.prefilledRoomCode = urlRoomCode || sessionRoomCode || "";
 
-        // Show Pre-Game Waiting Screen (Do NOT enter match until started!)
-        this.showWaitingScreen();
+        // Show Main Menu Lobby Screen (Liên Quân / Free Fire style) by default!
+        this.showMainMenuScreen();
 
         // If player reloaded (F5) while inside an active room, automatically reconnect them!
         if (sessionRoomCode && sessionRoomCode.length >= 4) {
             setTimeout(() => {
                 this.joinMultiplayerRoomByCode(sessionRoomCode);
             }, 250);
+        } else if (urlRoomCode && urlRoomCode.length >= 4) {
+            setTimeout(() => {
+                this.openPvpLobbyFromMainMenu();
+            }, 200);
         }
     }
 
@@ -211,17 +248,292 @@ class GoldenJourneyGame {
     }
 
     // ========================================================================
+    // MAIN MENU LOBBY SCREEN (#main-menu-screen) & UNIFIED EXIT FLOW
+    // ========================================================================
+    syncMainMenuUI() {
+        const nameEl = document.getElementById("mm-captain-name");
+        if (nameEl) {
+            nameEl.textContent = this.roomState.localPlayerName || "Thuyền Trưởng";
+        }
+        const gfxBtn = document.getElementById("btn-mm-graphics");
+        if (gfxBtn && this.world) {
+            gfxBtn.textContent = this.world.graphicsQuality === "smooth"
+                ? "⚡ Đồ họa: Siêu Mượt"
+                : "✨ Đồ họa: Đẹp (Tối ưu)";
+        }
+        const audioBtn = document.getElementById("btn-mm-audio");
+        if (audioBtn && window.SFX) {
+            audioBtn.textContent = window.SFX.muted ? "🔇 Âm Thanh: Tắt" : "🔊 Âm Thanh: Bật";
+        }
+    }
+
+    showMainMenuScreen() {
+        this.isGameStarted = false;
+        this.isInMatchLobbyOverlayOpen = false;
+        clearInterval(this.openRoomsPollTimer);
+        const menuEl = document.getElementById("main-menu-screen");
+        if (menuEl) menuEl.classList.remove("hidden");
+        const waitOverlay = document.getElementById("waiting-screen-overlay");
+        if (waitOverlay) {
+            waitOverlay.classList.add("hidden");
+            waitOverlay.classList.remove("in-match-overlay");
+        }
+        const topHud = document.getElementById("top-hud-bar");
+        if (topHud) topHud.classList.add("hidden-hud");
+        const leftHud = document.getElementById("left-hud-panel");
+        if (leftHud) leftHud.classList.add("hidden-hud");
+        const rightHud = document.getElementById("right-hud-panel");
+        if (rightHud) rightHud.classList.add("hidden-hud");
+        const tickerWrap = document.getElementById("bottom-live-ticker-wrap");
+        if (tickerWrap) tickerWrap.classList.add("hidden-hud");
+        const yagiBanner = document.getElementById("yagi-red-alert-banner");
+        if (yagiBanner) yagiBanner.classList.add("hidden");
+        const sbPanel = document.getElementById("sandbox-creative-panel");
+        if (sbPanel) sbPanel.classList.add("hidden");
+        const reopenBtn = document.getElementById("reopen-quiz-btn");
+        if (reopenBtn) reopenBtn.classList.add("hidden");
+        const pregameBanner = document.getElementById("pregame-countdown-banner");
+        if (pregameBanner) pregameBanner.classList.add("hidden");
+        const tooltip = document.getElementById("hex-tooltip");
+        if (tooltip) tooltip.classList.add("hidden");
+        const pop = document.getElementById("mm-settings-popover");
+        if (pop) pop.classList.add("hidden");
+
+        this.hideAfkWarningBanner();
+        this.hideAfkAutoNotice();
+        this.syncMainMenuUI();
+        this.checkMainMenuServerStatus();
+        if (this.world && typeof this.world.setMenuOrbitMode === "function") {
+            this.world.setMenuOrbitMode(true);
+        }
+    }
+
+    async checkMainMenuServerStatus(attempt = 0) {
+        const statusEl = document.getElementById("mm-server-status");
+        if (!statusEl || typeof fetch !== "function") return;
+        clearTimeout(this._mmStatusRetryTimer);
+        if (attempt === 0) {
+            statusEl.classList.remove("is-offline");
+            statusEl.classList.add("is-connecting");
+            statusEl.innerHTML = `<span class="mm-online-dot"></span> Đang kết nối...`;
+        }
+        try {
+            const resp = await fetch("/api/room/list", { method: "GET", cache: "no-store" });
+            if (resp && resp.ok) {
+                statusEl.classList.remove("is-connecting", "is-offline");
+                statusEl.innerHTML = `<span class="mm-online-dot"></span> Trực tuyến`;
+                return;
+            }
+        } catch (e) {}
+        if (attempt < 2) {
+            this._mmStatusRetryTimer = setTimeout(() => {
+                if (!this.isGameStarted) this.checkMainMenuServerStatus(attempt + 1);
+            }, 1800);
+            return;
+        }
+        statusEl.classList.remove("is-connecting");
+        statusEl.classList.add("is-offline");
+        statusEl.innerHTML = `<span class="mm-online-dot"></span> Ngoại tuyến`;
+    }
+
+    hideMainMenuScreen() {
+        const menuEl = document.getElementById("main-menu-screen");
+        if (menuEl) menuEl.classList.add("hidden");
+        const pop = document.getElementById("mm-settings-popover");
+        if (pop) pop.classList.add("hidden");
+    }
+
+    startMainMenuNameEdit() {
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+        const disp = document.getElementById("mm-name-display-row");
+        const edit = document.getElementById("mm-name-edit-row");
+        const inp = document.getElementById("mm-captain-name-input");
+        if (disp) disp.classList.add("hidden");
+        if (edit) edit.classList.remove("hidden");
+        if (inp) {
+            inp.value = this.roomState.localPlayerName || "Thuyền Trưởng";
+            inp.focus();
+            inp.select();
+        }
+    }
+
+    saveMainMenuNameEdit() {
+        const disp = document.getElementById("mm-name-display-row");
+        const edit = document.getElementById("mm-name-edit-row");
+        const inp = document.getElementById("mm-captain-name-input");
+        if (inp) {
+            const clean = inp.value.trim();
+            if (clean) {
+                this.updateLocalPlayerName(clean);
+            }
+        }
+        if (edit) edit.classList.add("hidden");
+        if (disp) disp.classList.remove("hidden");
+        this.syncMainMenuUI();
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+    }
+
+    toggleMainMenuSettings(ev) {
+        if (ev) ev.stopPropagation();
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+        const pop = document.getElementById("mm-settings-popover");
+        if (pop) {
+            pop.classList.toggle("hidden");
+            this.syncMainMenuUI();
+        }
+    }
+
+    toggleMainMenuGraphics() {
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+        if (this.world && typeof this.world.toggleGraphicsQuality === "function") {
+            const mode = this.world.toggleGraphicsQuality();
+            const hudGfxBtn = document.getElementById("btn-graphics-quality");
+            if (hudGfxBtn) {
+                hudGfxBtn.textContent = mode === "smooth" ? "⚡ Siêu Mượt" : "✨ Đẹp (Tối ưu)";
+            }
+            this.syncMainMenuUI();
+            this.showToast(mode === "smooth"
+                ? "⚡ Đã chuyển đồ họa: Siêu Mượt (Tối ưu FPS)"
+                : "✨ Đã chuyển đồ họa: Đẹp (Tối ưu)");
+        }
+    }
+
+    toggleMainMenuAudio() {
+        if (window.SFX && typeof window.SFX.toggleMute === "function") {
+            const muted = window.SFX.toggleMute();
+            const hudAudioBtn = document.getElementById("btn-toggle-audio");
+            if (hudAudioBtn) {
+                hudAudioBtn.textContent = muted ? "🔇 Âm Thanh: Tắt" : "🔊 Âm Thanh";
+            }
+            this.syncMainMenuUI();
+        }
+    }
+
+    openPvpLobbyFromMainMenu() {
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+        this.hideMainMenuScreen();
+        this.lobbySubView = "browse";
+        this.showWaitingScreen();
+        this.fetchOpenRoomsList();
+    }
+
+    openQuickRoomCodeFromMainMenu() {
+        this.openPvpLobbyFromMainMenu();
+        setTimeout(() => {
+            const codeInp = document.getElementById("wait-join-code");
+            if (codeInp) {
+                codeInp.focus();
+                codeInp.select();
+            }
+        }, 60);
+    }
+
+    async returnToMainMenu(options = {}) {
+        const confirmIfPlaying = Boolean(options && options.confirmIfPlaying);
+        if (confirmIfPlaying && this.isGameStarted && !this.matchWinner && !this.sandboxMode) {
+            if (typeof window !== "undefined" && typeof window.confirm === "function") {
+                const ok = window.confirm("Trận đấu đang diễn ra. Bạn có chắc muốn rời phòng và về Sảnh Màn Hình Chính?");
+                if (!ok) return false;
+            }
+        }
+
+        // 1. Dừng và xóa toàn bộ timer / vòng lặp đang chạy
+        clearInterval(this.openingTimerInterval);
+        this.openingTimerInterval = null;
+        clearInterval(this.preGameCountdownInterval);
+        this.preGameCountdownInterval = null;
+        this.isPreGameCountingDown = false;
+        clearInterval(this.quizAutoCloseInterval);
+        this.quizAutoCloseInterval = null;
+        clearInterval(this.weatherClockInterval);
+        this.weatherClockInterval = null;
+        clearInterval(this.stormReadingTimerInterval);
+        this.stormReadingTimerInterval = null;
+        clearInterval(this.victoryCountdownInterval);
+        this.victoryCountdownInterval = null;
+        clearInterval(this.roomPollTimer);
+        this.roomPollTimer = null;
+        clearInterval(this.openRoomsPollTimer);
+        this.openRoomsPollTimer = null;
+        clearTimeout(this.autoEndTurnTimer);
+        this.autoEndTurnTimer = null;
+        clearTimeout(this.aiTurnTimer);
+        this.aiTurnTimer = null;
+        clearTimeout(this.aiPostMoveTimer);
+        this.aiPostMoveTimer = null;
+        clearTimeout(this.hoverTooltipTimer);
+        this.hoverTooltipTimer = null;
+        this._scheduledBotTurnKey = null;
+        this.clearZeroApAutoPassCountdown();
+
+        // 2. Đóng toàn bộ modal, bảng thông báo AFK, Chat Phòng, Quiz & Sảnh trong trận
+        this.resetRoomChatState();
+        this.closeAtlasLightbox();
+        this.hideAfkWarningBanner();
+        this.hideAfkAutoNotice();
+        this.closeInMatchLobbyOverlay();
+        if (typeof this.closeModal === "function") {
+            this.closeModal();
+        }
+        this.pendingQuiz = null;
+        this.liveQuizState = null;
+        this.currentPortTile = null;
+        this.cancelLockedMovePath(false);
+
+        // 3. Rời phòng PvP trên server (chuyển Chủ phòng hoặc dọn phòng sạch sẽ)
+        if (this.roomState && this.roomState.code) {
+            const leavingCode = this.roomState.code;
+            try {
+                await fetch("/api/room/leave", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ code: leavingCode, clientId: this.clientId })
+                });
+            } catch (e) {}
+        }
+        try { sessionStorage.removeItem("golden_active_room_code"); } catch (e) {}
+        this.roomState.code = null;
+        this.roomState.isHost = false;
+        this.roomState.status = "waiting";
+        this.roomState.seats = this.createEmptyLobbySeats();
+        this.updateRoomBadgeUI();
+
+        // 4. Dọn sạch dữ liệu trận cũ trên client & bản đồ 3D
+        this.isGameStarted = false;
+        this.isBusy = false;
+        this.matchWinner = null;
+        this.victoryShownForMatch = false;
+        this.players = [];
+        this.blockedMineIds = [];
+        this.isMatchClockFrozen = false;
+        this.disableSandboxCreativeMode();
+        if (this.world && typeof this.world.clearMatchVisuals === "function") {
+            this.world.clearMatchVisuals();
+        }
+
+        // 5. Hiện Sảnh Màn Hình Chính + bật camera tự động lướt quanh bản đồ 3D
+        this.showMainMenuScreen();
+        return true;
+    }
+
+    // ========================================================================
     // PRE-GAME WAITING SCREEN & ONLINE MULTIPLAYER ROOM LOBBY
     // ========================================================================
     showWaitingScreen() {
+        this.hideMainMenuScreen();
         this.isGameStarted = false;
+        this.isInMatchLobbyOverlayOpen = false;
         clearInterval(this.openingTimerInterval);
         clearInterval(this.quizAutoCloseInterval);
         clearInterval(this.weatherClockInterval);
         clearInterval(this.stormReadingTimerInterval);
         clearTimeout(this.autoEndTurnTimer);
         clearTimeout(this.hoverTooltipTimer);
-        document.getElementById("waiting-screen-overlay").classList.remove("hidden");
+        const overlay = document.getElementById("waiting-screen-overlay");
+        if (overlay) {
+            overlay.classList.remove("hidden");
+            overlay.classList.remove("in-match-overlay");
+        }
         document.getElementById("top-hud-bar").classList.add("hidden-hud");
         document.getElementById("left-hud-panel").classList.add("hidden-hud");
         document.getElementById("right-hud-panel").classList.add("hidden-hud");
@@ -236,10 +548,43 @@ class GoldenJourneyGame {
         this.startOpenRoomsPolling();
     }
 
+    openInMatchLobbyOverlay() {
+        if (!this.isGameStarted) {
+            this.showWaitingScreen();
+            return;
+        }
+        this.isInMatchLobbyOverlayOpen = true;
+        const overlay = document.getElementById("waiting-screen-overlay");
+        if (overlay) {
+            overlay.classList.remove("hidden");
+            overlay.classList.add("in-match-overlay");
+        }
+        this.renderWaitingScreen();
+    }
+
+    closeInMatchLobbyOverlay() {
+        if (!this.isInMatchLobbyOverlayOpen) return;
+        this.isInMatchLobbyOverlayOpen = false;
+        const overlay = document.getElementById("waiting-screen-overlay");
+        if (overlay) {
+            overlay.classList.add("hidden");
+            overlay.classList.remove("in-match-overlay");
+        }
+    }
+
     hideWaitingScreenAndShowHUD() {
+        this.hideMainMenuScreen();
         this.isGameStarted = true;
+        this.isInMatchLobbyOverlayOpen = false;
         clearInterval(this.openRoomsPollTimer);
-        document.getElementById("waiting-screen-overlay").classList.add("hidden");
+        if (this.world && typeof this.world.setMenuOrbitMode === "function") {
+            this.world.setMenuOrbitMode(false);
+        }
+        const overlay = document.getElementById("waiting-screen-overlay");
+        if (overlay) {
+            overlay.classList.add("hidden");
+            overlay.classList.remove("in-match-overlay");
+        }
         document.getElementById("top-hud-bar").classList.remove("hidden-hud");
         document.getElementById("left-hud-panel").classList.remove("hidden-hud");
         document.getElementById("right-hud-panel").classList.remove("hidden-hud");
@@ -263,7 +608,14 @@ class GoldenJourneyGame {
         // VIEW 1A: WELCOME SCREEN (GREETING + PLAYER NAME + MAIN BUTTONS — V3)
         // ====================================================================
         if (!this.roomState.code && this.lobbySubView !== "browse") {
+            const isMatchRunning = Boolean(this.isGameStarted && this.isInMatchLobbyOverlayOpen);
             container.innerHTML = `
+                ${isMatchRunning ? `
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; padding:8px 12px; border-radius:9px; background:#0f2942; border:1.5px solid #e6b84a; color:#fde68a; font-size:12.5px; font-weight:800">
+                        <span>⛵ Trận đấu đang diễn ra — Bấm ✕ để quay lại bàn cờ.</span>
+                        <button type="button" class="lobby-close-x-btn" onclick="window.GAME.closeInMatchLobbyOverlay()" title="Đóng và quay lại trận đấu">✕</button>
+                    </div>
+                ` : ''}
                 <div class="lobby-hero">
                     <div class="lobby-hero-badge">
                         <span>⛵ Board Game Chiến Thuật 3D Địa Lý &amp; Kinh Tế</span>
@@ -343,9 +695,15 @@ class GoldenJourneyGame {
 
             container.innerHTML = `
                 <div class="browse-top-bar">
-                    <button class="btn-secondary" onclick="window.GAME.backToWelcomeView()">⬅️ Quay lại</button>
-                    <h3 style="font-size:16px; font-weight:800">Danh Sách Phòng Đang Mở</h3>
-                    <button class="btn-secondary" onclick="window.GAME.fetchOpenRoomsList()">🔄 Làm mới</button>
+                    <button class="btn-secondary" onclick="window.GAME.showMainMenuScreen()">⬅️ Màn Hình Chính</button>
+                    <div style="display:flex; align-items:center; gap:9px">
+                        <img src="assets/logo.png" alt="Logo" class="lobby-mini-logo" />
+                        <h3 style="font-size:16px; font-weight:800; margin:0">⚔️ Phòng Đấu PvP (2–5 Người)</h3>
+                    </div>
+                    <div style="display:flex; gap:6px; align-items:center">
+                        <button class="btn-primary-gold" style="padding:7px 12px; font-size:12.5px" onclick="window.GAME.openCreateRoomModal()">➕ Tạo Phòng Mới</button>
+                        <button class="btn-secondary" onclick="window.GAME.fetchOpenRoomsList()">🔄 Làm mới</button>
+                    </div>
                 </div>
 
                 <div class="quick-code-bar">
@@ -397,7 +755,7 @@ class GoldenJourneyGame {
                 const cleanBotName = String(seat.name || `Tàu Máy #${idx + 1}`).replace(/Bot AI/gi, "Tàu Máy");
                 titleDisplay = `🤖 ${cleanBotName} <span class="slot-status-pill bot-pill">Tàu Máy (Bot)</span>`;
                 subText = "Tự động điều hướng, giao thương và tranh tài cùng người chơi";
-                if (this.roomState.isHost) {
+                if (this.roomState.isHost && !this.isGameStarted) {
                     actionButtons = `
                         <button class="btn-secondary" style="padding:5px 10px; font-size:11.5px" onclick="window.GAME.hostClearSeat(${idx})">
                             Xóa Tàu Máy
@@ -407,8 +765,8 @@ class GoldenJourneyGame {
             } else {
                 cardClass = "slot-empty";
                 titleDisplay = `Vị trí #${idx + 1} <span class="slot-status-pill empty-pill">Slot trống</span>`;
-                subText = "Đang chờ người chơi tham gia hoặc thêm Tàu Máy (Bot)...";
-                if (this.roomState.isHost) {
+                subText = this.isGameStarted ? "Vị trí trống trong trận đấu này" : "Đang chờ người chơi tham gia hoặc thêm Tàu Máy (Bot)...";
+                if (this.roomState.isHost && !this.isGameStarted) {
                     actionButtons = `
                         <button class="btn-trade-action" onclick="window.GAME.hostAddBotToSeat(${idx})">
                             + Thêm Tàu Máy (Bot)
@@ -433,46 +791,89 @@ class GoldenJourneyGame {
             `;
         }).join("");
 
+        const isMatchRunning = Boolean(this.isGameStarted && this.isInMatchLobbyOverlayOpen);
+        const existingLobbyDraftEl = document.getElementById("lobby-chat-input");
+        const preservedLobbyDraft = existingLobbyDraftEl ? existingLobbyDraftEl.value : "";
+        const wasLobbyChatFocused = Boolean(
+            typeof document !== "undefined" &&
+            existingLobbyDraftEl &&
+            document.activeElement === existingLobbyDraftEl
+        );
+
         container.innerHTML = `
             <div class="room-lobby-banner">
-                <div>
-                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px">
-                        <strong style="font-size:16px; color:#f8fafc">${this.roomState.roomName || ('Phòng ' + this.roomState.code)}</strong>
-                        <span class="room-privacy-tag ${this.roomState.isPrivate ? 'private' : 'public'}">
-                            ${this.roomState.isPrivate ? '🔒 Riêng tư (Có mật khẩu)' : '🌐 Công khai'}
-                        </span>
-                    </div>
-                    <div style="display:flex; align-items:center; gap:10px">
-                        <span style="font-size:12px; color:#cbd5e1">Mã phòng:</span>
-                        <span class="room-code-badge">${this.roomState.code}</span>
-                        <button class="btn-secondary" style="padding:5px 10px; font-size:11.5px" onclick="window.GAME.copyRoomCode()">📋 Copy Mã</button>
+                <div style="display:flex; align-items:center; gap:11px">
+                    <img src="assets/logo.png" alt="Logo" class="lobby-mini-logo" />
+                    <div>
+                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px">
+                            <strong style="font-size:16px; color:#f8fafc">${this.roomState.roomName || ('Phòng ' + this.roomState.code)}</strong>
+                            <span class="room-privacy-tag ${this.roomState.isPrivate ? 'private' : 'public'}">
+                                ${this.roomState.isPrivate ? '🔒 Riêng tư (Có mật khẩu)' : '🌐 Công khai'}
+                            </span>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:10px">
+                            <span style="font-size:12px; color:#cbd5e1">Mã phòng:</span>
+                            <span class="room-code-badge">${this.roomState.code}</span>
+                            <button class="btn-secondary" style="padding:5px 10px; font-size:11.5px" onclick="window.GAME.copyRoomCode()">📋 Copy Mã</button>
+                        </div>
                     </div>
                 </div>
-                <div style="display:flex; gap:8px; flex-wrap:wrap">
-                    ${this.roomState.isHost ? `
-                        <button class="btn-trade-action danger" onclick="window.GAME.closeMultiplayerRoom()">🗑️ Đóng Phòng</button>
-                    ` : ''}
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap">
                     <button class="btn-secondary" onclick="window.GAME.leaveMultiplayerRoom()">⬅️ Rời Phòng</button>
+                    ${isMatchRunning ? `
+                        <button type="button" class="lobby-close-x-btn" onclick="window.GAME.closeInMatchLobbyOverlay()" title="Đóng và quay lại trận đấu">✕</button>
+                    ` : ''}
                 </div>
             </div>
 
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:12.5px">
-                <span style="color:var(--ink-primary); font-weight:800">Danh sách thuyền trưởng (${activeSeats.length}/5)</span>
-                <span style="color:var(--ink-secondary); font-weight:700">🎲 Thuyền được chia ngẫu nhiên khi bắt đầu</span>
-            </div>
+            <div class="waiting-room-split">
+                <div class="waiting-room-slots-col">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:12.5px">
+                        <span style="color:var(--ink-primary); font-weight:800">Danh sách thuyền trưởng (${activeSeats.length}/5)</span>
+                        <span style="color:var(--ink-secondary); font-weight:700">🎲 Thuyền ngẫu nhiên khi bắt đầu</span>
+                    </div>
+                    <div class="slots-list-grid">
+                        ${slotsHtml}
+                    </div>
+                </div>
 
-            <div class="slots-list-grid">
-                ${slotsHtml}
+                <div class="lobby-chat-box">
+                    <div class="lobby-chat-header">
+                        <span>💬 Chat Phòng Chờ</span>
+                        <span class="lobby-chat-sub">Real-time • Giữ lịch sử vào trận</span>
+                    </div>
+                    <div id="lobby-chat-messages" class="chat-messages-list"></div>
+                    <div class="chat-composer-wrap">
+                        <div id="lobby-chat-spam-warn" class="chat-spam-warn hidden"></div>
+                        <div id="lobby-quick-popover" class="chat-quick-popover hidden" role="menu">
+                            <button type="button" class="chat-quick-chip" onclick="window.GAME && window.GAME.sendQuickChatPreset('🌾 Ai đổi tài nguyên?')">🌾 Ai đổi tài nguyên?</button>
+                            <button type="button" class="chat-quick-chip" onclick="window.GAME && window.GAME.sendQuickChatPreset('🤝 Lên Chợ P2P nhé!')">🤝 Lên Chợ P2P nhé!</button>
+                            <button type="button" class="chat-quick-chip" onclick="window.GAME && window.GAME.sendQuickChatPreset('⏳ Đợi mình chút!')">⏳ Đợi mình chút!</button>
+                            <button type="button" class="chat-quick-chip" onclick="window.GAME && window.GAME.sendQuickChatPreset('👏 Chơi hay quá!')">👏 Chơi hay quá!</button>
+                        </div>
+                        <div class="chat-input-bar">
+                            <button type="button" id="btn-lobby-quick-toggle" class="chat-quick-toggle-btn" title="Tin nhắn nhanh" onclick="window.GAME && window.GAME.toggleQuickChatPopover('lobby', event)">⚡</button>
+                            <div class="chat-input-box-wrap">
+                                <input type="text" id="lobby-chat-input" class="chat-text-input" maxlength="250" autocomplete="off" placeholder="Nhắn tin trong phòng..." oninput="window.GAME && window.GAME.updateChatCharCounter('lobby', this.value)" />
+                                <span id="lobby-chat-counter" class="chat-char-counter hidden">0/250</span>
+                            </div>
+                            <button type="button" id="btn-lobby-chat-send" class="chat-send-btn" onclick="window.GAME && window.GAME.submitLobbyChat()">Gửi</button>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; padding-top:10px; border-top:1.5px dashed rgba(110, 70, 32, 0.35)">
                 <div style="font-size:12px; color:var(--ink-secondary); font-weight:600">
-                    ${this.roomState.isHost
-                        ? `Bạn là <strong style="color:var(--ink-primary)">Chủ phòng</strong> (Nếu rời đi, quyền Chủ phòng tự động chuyển cho người tiếp theo).`
-                        : `Đang chờ Chủ phòng bắt đầu trận đấu...`
-                    }
+                    <div>
+                        ${this.roomState.isHost
+                            ? `Bạn là <strong style="color:var(--ink-primary)">Chủ phòng</strong> (Nếu rời đi, quyền Chủ phòng tự động chuyển cho người tiếp theo).`
+                            : `Đang chờ Chủ phòng bắt đầu trận đấu...`
+                        }
+                    </div>
+                    ${isMatchRunning ? `<div style="margin-top:4px; color:#0f766e; font-weight:800">⛵ Trận đấu đang diễn ra — Bấm ✕ để quay lại bàn cờ.</div>` : ''}
                 </div>
-                ${this.roomState.isHost ? `
+                ${(this.roomState.isHost && !isMatchRunning) ? `
                     <div style="display:flex; gap:8px; flex-wrap:wrap">
                         <button class="btn-primary-gold" ${canStart ? '' : 'disabled'} onclick="window.GAME.startRoomGameSession(false)">
                             🚀 Bắt Đầu Ván Đấu (${activeSeats.length} Người)
@@ -481,6 +882,26 @@ class GoldenJourneyGame {
                 ` : ''}
             </div>
         `;
+        const newLobbyInput = document.getElementById("lobby-chat-input");
+        if (newLobbyInput) {
+            if (preservedLobbyDraft) {
+                newLobbyInput.value = preservedLobbyDraft;
+                this.updateChatCharCounter("lobby", preservedLobbyDraft);
+            }
+            newLobbyInput.addEventListener("keydown", (e) => {
+                if (e.key === "Enter") {
+                    e.preventDefault();
+                    this.submitLobbyChat();
+                } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    this.closeAllQuickChatPopovers();
+                    newLobbyInput.blur();
+                }
+            });
+            if (wasLobbyChatFocused) newLobbyInput.focus();
+        }
+        this.renderRoomChatMessages("lobby");
+        this.updateChatSpamCooldownUI();
     }
 
     updateLocalPlayerName(val) {
@@ -765,28 +1186,6 @@ class GoldenJourneyGame {
         }
     }
 
-    async closeMultiplayerRoom() {
-        if (!this.roomState.code || !this.roomState.isHost) return;
-        const closingCode = this.roomState.code;
-        try {
-            await fetch("/api/room/close", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ code: closingCode, clientId: this.clientId })
-            });
-        } catch (e) {}
-        sessionStorage.removeItem("golden_active_room_code");
-        clearInterval(this.roomPollTimer);
-        this.roomState.code = null;
-        this.roomState.isHost = false;
-        this.roomState.status = "waiting";
-        this.roomState.seats = this.createEmptyLobbySeats();
-        this.lobbySubView = "welcome";
-        this.updateRoomBadgeUI();
-        this.showWaitingScreen();
-        this.showToast(`🗑️ Đã đóng phòng [${closingCode}].`);
-    }
-
     async hostAddBotToSeat(seatIdx) {
         if (!this.roomState.code || !this.roomState.isHost) return;
         try {
@@ -834,23 +1233,7 @@ class GoldenJourneyGame {
     }
 
     async leaveMultiplayerRoom() {
-        if (this.roomState.code) {
-            try {
-                await fetch("/api/room/leave", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ code: this.roomState.code, clientId: this.clientId })
-                });
-            } catch (e) {}
-        }
-        sessionStorage.removeItem("golden_active_room_code");
-        clearInterval(this.roomPollTimer);
-        this.roomState.code = null;
-        this.roomState.isHost = false;
-        this.roomState.status = "waiting";
-        this.roomState.seats = this.createEmptyLobbySeats();
-        this.updateRoomBadgeUI();
-        this.showWaitingScreen();
+        return this.returnToMainMenu({ confirmIfPlaying: true });
     }
 
     copyRoomCode() {
@@ -1328,6 +1711,7 @@ class GoldenJourneyGame {
 
         this.world.spawnShips(this.players, this.getLocalPlayer());
         this.beginTurn();
+        this.announceLocalPlayerSpawnAndFocus();
     }
 
     // ========================================================================
@@ -1336,6 +1720,7 @@ class GoldenJourneyGame {
     startRoomPolling() {
         clearInterval(this.roomPollTimer);
         if (!this.roomState.code) return;
+        this.connectRoomChatStream(this.roomState.code);
         this.isPollingRoom = false;
 
         this.roomPollTimer = setInterval(async () => {
@@ -1392,6 +1777,10 @@ class GoldenJourneyGame {
                         this.renderWaitingScreen();
                         this.showToast("ℹ️ Bạn đã rời khỏi phòng chờ.");
                         return;
+                    }
+
+                    if (Array.isArray(r.chatHistory) && r.chatHistory.length > 0) {
+                        this.handleIncomingChatMessages(r.chatHistory, this.roomChatMessages.length === 0);
                     }
 
                     // Log any new Bot Takeover / Handover events (1 line to Nhật Ký + Toast)
@@ -1481,10 +1870,14 @@ class GoldenJourneyGame {
 
     serializeGameState() {
         const resourceCooldowns = {};
+        const lockedMonuments = [];
         let rareNPCHex = null;
         this.world.hexTiles.forEach(t => {
             if (t.resourceCooldown > 0) {
                 resourceCooldowns[`${t.q},${t.r}`] = t.resourceCooldown;
+            }
+            if (t.monumentId && t.monumentLocked) {
+                lockedMonuments.push(t.monumentId);
             }
             if (t.hasNPC) {
                 rareNPCHex = { q: t.q, r: t.r };
@@ -1496,6 +1889,8 @@ class GoldenJourneyGame {
             activePlayerIdx: this.activePlayerIdx,
             sandboxMode: Boolean(this.sandboxMode),
             monumentAssignments: this.monumentAssignments,
+            lockedMonuments,
+            exhaustedTiersNotified: Array.from(this.exhaustedTiersNotified || []),
             players: this.players,
             marketListings: this.marketListings,
             buyOrders: this.buyOrders || [],
@@ -1508,7 +1903,9 @@ class GoldenJourneyGame {
             activePublicQuests: this.activePublicQuests || [],
             matchStats: this.matchStats || { portTrades: {}, portVisits: {}, totalP2P: 0, disasterDamage: 0, stormReefDamage: 0 },
             matchElapsedSec: this.matchElapsedSec,
+            isMatchClockFrozen: Boolean(this.isMatchClockFrozen),
             currentWeatherPhase: this.currentWeatherPhase,
+            blockedMineIds: this.blockedMineIds || [],
             resourceCooldowns,
             rareNPCHex,
             liveQuizState: this.liveQuizState,
@@ -1533,6 +1930,25 @@ class GoldenJourneyGame {
             this.startMatchClockAndWeatherEngine();
         }
 
+        if (Array.isArray(state.lockedMonuments) && this.world && this.world.hexTiles) {
+            const lockedSet = new Set(state.lockedMonuments);
+            this.world.hexTiles.forEach(t => {
+                if (t.monumentId) t.monumentLocked = lockedSet.has(t.monumentId);
+            });
+        }
+        if (Array.isArray(state.exhaustedTiersNotified)) {
+            this.exhaustedTiersNotified = new Set(state.exhaustedTiersNotified);
+        }
+        if (Array.isArray(state.blockedMineIds)) {
+            this.blockedMineIds = [...state.blockedMineIds];
+            if (this.world && Array.isArray(this.world.hexTiles)) {
+                const blockedSet = new Set(this.blockedMineIds);
+                this.world.hexTiles.forEach(t => {
+                    t.stormRestricted = Boolean(t.resourceType && blockedSet.has(`${t.q},${t.r}`));
+                });
+                this.world.updateResourceVisuals();
+            }
+        }
         this.roundNumber = state.roundNumber;
         this.activePlayerIdx = state.activePlayerIdx;
         this.marketListings = state.marketListings || this.marketListings;
@@ -1572,6 +1988,9 @@ class GoldenJourneyGame {
         if (typeof state.matchElapsedSec === "number" && !this.roomState.isHost) {
             this.matchElapsedSec = state.matchElapsedSec;
         }
+        if (typeof state.isMatchClockFrozen === "boolean" && !this.roomState.isHost) {
+            this.isMatchClockFrozen = state.isMatchClockFrozen;
+        }
         if (state.currentWeatherPhase && state.currentWeatherPhase !== this.currentWeatherPhase) {
             this.applyWeatherPhase(state.currentWeatherPhase, false);
         }
@@ -1584,6 +2003,7 @@ class GoldenJourneyGame {
             });
             this.world.updateResourceVisuals();
         }
+        this.syncMonumentVisuals3D();
 
         // Rebuild ships only on initial load; otherwise smoothly glide ships so spectator camera is never disturbed!
         if (rebuildBoard || this.world.shipMeshes.size !== this.players.length) {
@@ -1607,6 +2027,7 @@ class GoldenJourneyGame {
         if (prevActiveIdx !== this.activePlayerIdx || prevRound !== this.roundNumber) {
             this.showingSpectatorQuizId = null;
             this.showingAnsweredSpectatorQuizId = null;
+            this.syncAfkAutoNoticeUI();
             this.spectatorClosedAskingQuizId = null;
             this.spectatorHiddenAnsweredQuizId = null;
             this.lastSpectatorQuizSnapshot = null;
@@ -1953,7 +2374,11 @@ class GoldenJourneyGame {
 
                 <div class="visual-memory-grid">
                     <div class="visual-memory-photo-wrap">
-                        <img src="${quiz.visualImg}" alt="Hình minh họa kiến thức Địa lý" class="visual-memory-img" />
+                        <img src="${quiz.visualImg}" alt="Hình minh họa kiến thức Địa lý" class="visual-memory-img atlas-zoomable-img"
+                             title="Bấm để phóng to hình ảnh &amp; xem nguồn gốc"
+                             onclick="window.GAME && window.GAME.openAtlasLightboxByVisual(this.getAttribute('src'), this.dataset.caption, this.dataset.credit)"
+                             data-caption="${String(quiz.visualCaption || '').replace(/"/g, '&quot;')}"
+                             data-credit="${String(quiz.visualCredit || '').replace(/"/g, '&quot;')}" />
                         <div class="visual-memory-caption">
                             📸 <strong>Minh họa thực tế:</strong> ${quiz.visualCaption}
                         </div>
@@ -2023,6 +2448,133 @@ class GoldenJourneyGame {
         return (this.players || []).find(pl => !pl.eliminated && pl.charterRegionId === regionId) || null;
     }
 
+    // ------------------------------------------------------------------------
+    // KEY-1: KIỂM TRA CẤP DI TÍCH CÒN KHẢ DỤNG & KHÓA TỨC THÌ KHI CHINH PHỤC HẾT
+    // ------------------------------------------------------------------------
+    isTierExhausted(tier) {
+        const tNum = Number(tier);
+        if (![1, 2, 3].includes(tNum)) return true;
+        if (!this.world || !Array.isArray(this.world.hexTiles) || this.world.hexTiles.length === 0) return false;
+        const tierTiles = this.world.hexTiles.filter(t => t.monumentId && t.monumentTier === tNum);
+        if (tierTiles.length === 0) return true;
+
+        // 1. Nếu toàn bộ Di tích của cấp này đã bị khóa (VD: Cấp 3 có 3 Di tích đều đã giải) -> Hết cấp!
+        if (tierTiles.every(t => Boolean(t.monumentLocked))) return true;
+
+        // 2. Quét trên toàn bộ người chơi còn sống: nếu KHÔNG còn ai có thể chinh phục thêm Di tích cấp này -> Hết cấp!
+        const alivePlayers = (this.players || []).filter(pl => !pl.eliminated);
+        if (alivePlayers.length === 0) return false;
+
+        if (tNum === 1 && alivePlayers.every(pl => (pl.tier1Visited || 0) >= 1)) {
+            return true;
+        }
+        const anyConquerableLeft = tierTiles.some(tile => {
+            if (tile.monumentLocked) return false;
+            return alivePlayers.some(pl => {
+                if (tNum === 1 && (pl.tier1Visited || 0) >= 1) return false;
+                return !(pl.relics || []).some(r => r.id === tile.monumentId);
+            });
+        });
+        return !anyConquerableLeft;
+    }
+
+    getActiveMonumentTiers() {
+        return [1, 2, 3].filter(tier => !this.isTierExhausted(tier));
+    }
+
+    checkAndNotifyExhaustedMonumentTier(tier) {
+        const tNum = Number(tier);
+        if (![1, 2, 3].includes(tNum)) return;
+        if (!this.exhaustedTiersNotified) this.exhaustedTiersNotified = new Set();
+        if (this.isTierExhausted(tNum) && !this.exhaustedTiersNotified.has(tNum)) {
+            this.exhaustedTiersNotified.add(tNum);
+            const msg = `🏛️ Toàn bộ Di tích Cấp ${tNum} đã được chinh phục! Các Thương Cảng ngừng bán Key ${tNum}.`;
+            this.logEvent(msg);
+            this.addTradeBulletinNotice(msg);
+            this.showToast(msg);
+        }
+    }
+
+    syncMonumentVisuals3D() {
+        if (!this.world || typeof this.world.updateMonumentVisuals !== "function") return;
+        const earlyLock = this.isEarlyGameMonumentLockActive();
+        const conquerorsMap = {};
+        if (Array.isArray(this.world.hexTiles)) {
+            this.world.hexTiles.forEach(t => {
+                if (t.monumentId && t.monumentConqueror && t.monumentConqueror.name) {
+                    conquerorsMap[t.monumentId] = t.monumentConqueror;
+                }
+            });
+        }
+        (this.players || []).forEach(pl => {
+            (pl.relics || []).forEach(r => {
+                if (r && r.id && !conquerorsMap[r.id]) {
+                    conquerorsMap[r.id] = { name: pl.name, color: pl.color };
+                }
+            });
+        });
+        this.world.updateMonumentVisuals(earlyLock, conquerorsMap);
+    }
+
+    syncPortOwnershipVisuals3D() {
+        if (!this.world || typeof this.world.updatePortOwnershipVisuals !== "function") return;
+        const viewer = this.getLocalPlayer() || this.getActivePlayer();
+        const viewerCoins = viewer ? (viewer.coins || 0) : 0;
+        const states = {};
+        for (let regId = 0; regId < 6; regId++) {
+            const owner = this.getPortCharterOwner(regId);
+            if (!owner) {
+                states[regId] = { mode: "free", ownerName: "", ownerColor: "#38bdf8", needsCoinWarning: false };
+            } else if (viewer && owner.id === viewer.id) {
+                states[regId] = { mode: "mine", ownerName: owner.name, ownerColor: owner.color, needsCoinWarning: false };
+            } else {
+                states[regId] = {
+                    mode: "other",
+                    ownerName: owner.name,
+                    ownerColor: owner.color,
+                    needsCoinWarning: viewerCoins < 1
+                };
+            }
+        }
+        this.world.updatePortOwnershipVisuals(states);
+    }
+
+    focusCameraOnOwnCharterPort() {
+        const localP = this.getLocalPlayer() || this.getActivePlayer();
+        if (!localP || localP.charterRegionId === undefined || localP.charterRegionId === null) {
+            this.showToast("🌐 Bạn chưa có Cảng Thương quyền riêng!");
+            return;
+        }
+        if (!this.world || !Array.isArray(this.world.hexTiles)) return;
+        const portTile = this.world.hexTiles.find(t => t.isPort && t.regionId === localP.charterRegionId);
+        if (!portTile) return;
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+        this.world.focusCameraOnHex(portTile.q, portTile.r);
+        this.showToast(`👑 Đã đưa góc nhìn về Cảng nhà: ${portTile.portName}`);
+    }
+
+    cycleMapLabelMode() {
+        const order = ["compact", "full", "regions-blockade", "hidden"];
+        const cur = (this.world && this.world.htmlLabelMode) || "compact";
+        const next = order[(order.indexOf(cur) + 1) % order.length];
+        if (this.world && typeof this.world.setHtmlLabelMode === "function") {
+            this.world.setHtmlLabelMode(next);
+        }
+        const meta = {
+            compact: { btnText: "🏷️ Gọn", label: "Gọn (Chỉ huy hiệu)" },
+            full: { btnText: "🏷️ Đầy đủ", label: "Đầy đủ (Tên Cảng, Di tích & 6 Vùng)" },
+            "regions-blockade": { btnText: "🏷️ Vùng & Bão", label: "Vùng & Bão (Chỉ 6 Vùng Kinh Tế & mỏ Phong Tỏa)" },
+            hidden: { btnText: "🏷️ Ẩn", label: "Ẩn (Chỉ giữ tên tàu)" }
+        }[next];
+        const btn = document.getElementById("btn-map-label-mode");
+        if (btn) {
+            btn.textContent = meta.btnText;
+            btn.title = `Chế độ nhãn bản đồ (Phím L): Gọn / Đầy đủ / Vùng & Bão / Ẩn — Hiện tại: ${meta.label}`;
+        }
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+        this.showToast(`🏷️ Nhãn bản đồ: ${meta.label}`);
+    }
+
     getPlayerProsperity(player) {
         return player ? (player.prosperityPoints || 0) : 0;
     }
@@ -2037,15 +2589,55 @@ class GoldenJourneyGame {
 
     comparePlayersForRanking(a, b, includeSecret = false) {
         if (Boolean(a.eliminated) !== Boolean(b.eliminated)) return a.eliminated ? 1 : -1;
+        // Tầng 1: Tổng Điểm Thịnh Vượng (Công khai + Bí mật khi tổng kết)
         const scoreA = includeSecret ? this.getTotalProsperity(a) : this.getPlayerProsperity(a);
         const scoreB = includeSecret ? this.getTotalProsperity(b) : this.getPlayerProsperity(b);
-        const pDiff = scoreB - scoreA;
-        if (pDiff !== 0) return pDiff;
+        if (scoreB !== scoreA) return scoreB - scoreA;
+        // Tầng 2: Số Di tích đã chinh phục nhiều hơn
         const rDiff = ((b.relics && b.relics.length) || 0) - ((a.relics && a.relics.length) || 0);
         if (rDiff !== 0) return rDiff;
-        const p2pDiff = (b.p2pTrades || 0) - (a.p2pTrades || 0);
-        if (p2pDiff !== 0) return p2pDiff;
-        return (b.coins || 0) - (a.coins || 0);
+        // Tầng 3: Tổng số câu Quiz Địa lý trả lời đúng nhiều hơn
+        const quizDiff = (b.quizCorrect || 0) - (a.quizCorrect || 0);
+        if (quizDiff !== 0) return quizDiff;
+        // Tầng 4: Tổng lượng Xu vàng + tổng số tài nguyên/đặc sản còn trong kho
+        const wealthA = (a.coins || 0) + this.getCargoCount(a);
+        const wealthB = (b.coins || 0) + this.getCargoCount(b);
+        return wealthB - wealthA;
+    }
+
+    getTieBreakerReason(first, second) {
+        if (!first || !second) return "";
+        if (this.getTotalProsperity(first) !== this.getTotalProsperity(second)) return "";
+        const mon1 = (first.relics || []).length, mon2 = (second.relics || []).length;
+        if (mon1 !== mon2) {
+            return `⚖️ Phá hòa Tầng 2: ${first.name} thắng nhờ chinh phục nhiều Di tích hơn (${mon1} so với ${mon2} Di tích).`;
+        }
+        const q1 = first.quizCorrect || 0, q2 = second.quizCorrect || 0;
+        if (q1 !== q2) {
+            return `⚖️ Phá hòa Tầng 3: ${first.name} thắng nhờ trả lời đúng nhiều câu Quiz Địa lý hơn (${q1} so với ${q2} câu đúng).`;
+        }
+        const w1 = (first.coins || 0) + this.getCargoCount(first);
+        const w2 = (second.coins || 0) + this.getCargoCount(second);
+        if (w1 !== w2) {
+            return `⚖️ Phá hòa Tầng 4: ${first.name} thắng nhờ tổng Xu + hàng trong kho cao hơn (${w1} so với ${w2}).`;
+        }
+        return `⚖️ Bằng điểm cả 4 chỉ số phụ — xếp hạng theo thứ tự xuất phát.`;
+    }
+
+    checkSprint12Alerts() {
+        if (!this.isGameStarted || !Array.isArray(this.players)) return;
+        if (!this.sprint12NotifiedIds) this.sprint12NotifiedIds = new Set();
+        this.players.forEach(pl => {
+            if (!pl || pl.eliminated) return;
+            const pubPts = this.getPlayerProsperity(pl);
+            if (pubPts >= 12 && !this.sprint12NotifiedIds.has(pl.id)) {
+                this.sprint12NotifiedIds.add(pl.id);
+                const msg = `🔥 ${pl.name} đã đạt ${pubPts}/15 ⭐ Thịnh Vượng — Trận đấu bước vào giai đoạn nước rút!`;
+                this.logEvent(msg);
+                this.addTradeBulletinNotice(msg);
+                this.showToast(msg);
+            }
+        });
     }
 
     // ========================================================================
@@ -2307,7 +2899,7 @@ class GoldenJourneyGame {
         const html = `
             <div class="modal-header-badge" style="background:#0f2942; border-color:#e6b84a; color:#fde68a">
                 <span>📋 BẢNG NHIỆM VỤ CHIẾN THUẬT — HÀNH TRÌNH VÀNG SON V3</span>
-                <span class="badge-tag">⭐ Công khai: ${pubPts} • 🕵️ Ẩn: +${secPts} (Tổng: ${pubPts + secPts}/15)</span>
+                <span class="badge-tag">Tổng điểm thực tế của bạn: ${pubPts} + ${secPts} bí mật = ${pubPts + secPts}/15 ⭐</span>
             </div>
 
             <div class="quest-section-heading">
@@ -2356,13 +2948,453 @@ class GoldenJourneyGame {
     }
 
     // ========================================================================
-    // QUICK EMOTES ON THE SEA (💬 -> 3D FLOATING SPEECH BUBBLE FOR 3.5s)
+    // REAL-TIME ROOM CHAT (LOBBY + IN-MATCH SSE STREAM + SANDBOX LOCAL CHAT)
+    // ========================================================================
+    connectRoomChatStream(code) {
+        const cleanCode = String(code || "").trim().toUpperCase();
+        if (!cleanCode) return;
+        if (this.chatEventSource && this.chatStreamRoomCode === cleanCode && this.chatEventSource.readyState !== 2) {
+            return;
+        }
+        this.disconnectRoomChatStream();
+        if (typeof EventSource !== "function") return;
+        try {
+            const es = new EventSource(`/api/room/chat/stream?code=${encodeURIComponent(cleanCode)}`);
+            this.chatEventSource = es;
+            this.chatStreamRoomCode = cleanCode;
+
+            es.addEventListener("room_chat_history", (ev) => {
+                try {
+                    const list = JSON.parse(ev.data || "[]");
+                    this.handleIncomingChatMessages(list, true);
+                } catch (e) {}
+            });
+
+            es.addEventListener("room_chat_message", (ev) => {
+                try {
+                    const msg = JSON.parse(ev.data || "null");
+                    if (msg) this.handleIncomingChatMessages([msg], false);
+                } catch (e) {}
+            });
+        } catch (e) {
+            this.chatEventSource = null;
+            this.chatStreamRoomCode = null;
+        }
+    }
+
+    disconnectRoomChatStream() {
+        if (this.chatEventSource) {
+            try { this.chatEventSource.close(); } catch (e) {}
+            this.chatEventSource = null;
+        }
+        this.chatStreamRoomCode = null;
+    }
+
+    resetRoomChatState() {
+        this.disconnectRoomChatStream();
+        clearInterval(this.chatSpamTimer);
+        this.chatSpamTimer = null;
+        this.chatConsecutiveCount = 0;
+        this.chatSpamCooldownUntil = 0;
+        this.lastChatSentAt = 0;
+        this.roomChatMessages = [];
+        this.roomChatSeenIds = new Set();
+        this.roomChatUnreadCount = 0;
+        this.isInMatchChatOpen = false;
+        this.closeAllQuickChatPopovers();
+        const panel = document.getElementById("inmatch-chat-panel");
+        if (panel) panel.classList.add("hidden");
+        const inList = document.getElementById("inmatch-chat-messages");
+        if (inList) inList.textContent = "";
+        const lobList = document.getElementById("lobby-chat-messages");
+        if (lobList) lobList.textContent = "";
+        const inInp = document.getElementById("inmatch-chat-input");
+        if (inInp) inInp.value = "";
+        this.updateChatCharCounter("inmatch", "");
+        this.updateChatCharCounter("lobby", "");
+        this.updateChatSpamCooldownUI();
+        this.updateChatUnreadBadgeUI();
+    }
+
+    toggleQuickChatPopover(scope = "inmatch", ev = null) {
+        if (ev) ev.stopPropagation();
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+        const pop = document.getElementById(`${scope}-quick-popover`);
+        const btn = document.getElementById(`btn-${scope}-quick-toggle`);
+        if (!pop) return;
+        const willOpen = pop.classList.contains("hidden");
+        this.closeAllQuickChatPopovers();
+        if (willOpen) {
+            pop.classList.remove("hidden");
+            if (btn) btn.classList.add("is-open");
+        }
+    }
+
+    closeAllQuickChatPopovers() {
+        ["inmatch", "lobby"].forEach(scope => {
+            const pop = document.getElementById(`${scope}-quick-popover`);
+            const btn = document.getElementById(`btn-${scope}-quick-toggle`);
+            if (pop) pop.classList.add("hidden");
+            if (btn) btn.classList.remove("is-open");
+        });
+    }
+
+    updateChatCharCounter(scope = "inmatch", val = "") {
+        const counter = document.getElementById(`${scope}-chat-counter`);
+        if (!counter) return;
+        const len = String(val || "").length;
+        if (len === 0) {
+            counter.classList.add("hidden");
+            counter.classList.remove("is-warn", "is-max");
+            counter.textContent = "0/250";
+            return;
+        }
+        counter.classList.remove("hidden");
+        counter.textContent = `${len}/250`;
+        counter.classList.toggle("is-warn", len >= 210 && len < 250);
+        counter.classList.toggle("is-max", len >= 250);
+    }
+
+    startChatSpamCooldown(seconds = 10) {
+        const sec = Math.max(1, Math.ceil(Number(seconds) || 10));
+        this.chatSpamCooldownUntil = Date.now() + sec * 1000;
+        this.chatConsecutiveCount = 0;
+        this.closeAllQuickChatPopovers();
+        clearInterval(this.chatSpamTimer);
+        this.updateChatSpamCooldownUI();
+        this.chatSpamTimer = setInterval(() => {
+            if (Date.now() >= (this.chatSpamCooldownUntil || 0)) {
+                clearInterval(this.chatSpamTimer);
+                this.chatSpamTimer = null;
+                this.chatSpamCooldownUntil = 0;
+                this.chatConsecutiveCount = 0;
+            }
+            this.updateChatSpamCooldownUI();
+        }, 250);
+    }
+
+    updateChatSpamCooldownUI() {
+        const nowMs = Date.now();
+        const remainingMs = Math.max(0, (this.chatSpamCooldownUntil || 0) - nowMs);
+        const isLocked = remainingMs > 0;
+        const sec = Math.max(1, Math.ceil(remainingMs / 1000));
+        const warnText = `⏳ Bạn nhắn quá nhanh (tối đa 4 tin liên tiếp) — Vui lòng chờ ${sec}s`;
+
+        ["inmatch", "lobby"].forEach(scope => {
+            const warnEl = document.getElementById(`${scope}-chat-spam-warn`);
+            if (warnEl) {
+                if (isLocked) {
+                    warnEl.textContent = warnText;
+                    warnEl.classList.remove("hidden");
+                } else {
+                    warnEl.textContent = "";
+                    warnEl.classList.add("hidden");
+                }
+            }
+            const sendBtn = document.getElementById(`btn-${scope}-chat-send`);
+            if (sendBtn) sendBtn.disabled = isLocked;
+        });
+
+        if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
+            document.querySelectorAll(".chat-quick-chip").forEach(btn => {
+                btn.disabled = isLocked;
+            });
+        }
+    }
+
+    handleIncomingChatMessages(list, isInitialHistory = false) {
+        if (!Array.isArray(list) || list.length === 0) return;
+        let addedAny = false;
+        let unreadDelta = 0;
+
+        for (let i = 0; i < list.length; i++) {
+            const msg = list[i];
+            if (!msg || !msg.id) continue;
+            if (this.roomChatSeenIds.has(msg.id)) continue;
+            this.roomChatSeenIds.add(msg.id);
+            this.roomChatMessages.push(msg);
+            addedAny = true;
+
+            if (!isInitialHistory && !msg.isSystem && msg.senderId !== this.clientId) {
+                // Another player spoke -> reset local consecutive spam counter!
+                this.chatConsecutiveCount = 0;
+                if (this.isGameStarted && !this.isInMatchChatOpen) {
+                    unreadDelta += 1;
+                }
+            }
+        }
+
+        if (this.roomChatMessages.length > 60) {
+            this.roomChatMessages = this.roomChatMessages.slice(-60);
+        }
+
+        if (unreadDelta > 0) {
+            this.roomChatUnreadCount += unreadDelta;
+            this.updateChatUnreadBadgeUI();
+        }
+        if (addedAny) {
+            this.renderRoomChatMessages("both");
+        }
+    }
+
+    updateChatUnreadBadgeUI() {
+        const badge = document.getElementById("chat-unread-badge");
+        if (!badge) return;
+        if (this.roomChatUnreadCount > 0 && !this.isInMatchChatOpen) {
+            badge.textContent = this.roomChatUnreadCount > 9 ? "9+" : String(this.roomChatUnreadCount);
+            badge.classList.remove("hidden");
+        } else {
+            badge.textContent = "0";
+            badge.classList.add("hidden");
+        }
+    }
+
+    renderRoomChatMessages(target = "both") {
+        const containers = [];
+        if (target === "both" || target === "lobby") {
+            const lob = document.getElementById("lobby-chat-messages");
+            if (lob) containers.push(lob);
+        }
+        if (target === "both" || target === "inmatch") {
+            const inm = document.getElementById("inmatch-chat-messages");
+            if (inm) containers.push(inm);
+        }
+        if (containers.length === 0) return;
+
+        containers.forEach((box) => {
+            box.textContent = "";
+            if (this.roomChatMessages.length === 0) {
+                const hint = document.createElement("div");
+                hint.className = "chat-empty-hint";
+                hint.textContent = this.roomState && this.roomState.code
+                    ? "Chưa có tin nhắn nào. Hãy gửi lời chào các Thuyền trưởng!"
+                    : "Bắt đầu nhắn tin thử nghiệm tại đây...";
+                box.appendChild(hint);
+                return;
+            }
+
+            this.roomChatMessages.forEach((msg) => {
+                const row = document.createElement("div");
+                const isMe = Boolean(!msg.isSystem && msg.senderId === this.clientId);
+                row.className = "chat-msg-row" + (msg.isSystem ? " is-system" : (isMe ? " is-me" : ""));
+
+                if (msg.isSystem) {
+                    const textSpan = document.createElement("span");
+                    textSpan.className = "chat-msg-text";
+                    textSpan.textContent = String(msg.message || "");
+                    const timeSpan = document.createElement("span");
+                    timeSpan.className = "chat-msg-time";
+                    timeSpan.textContent = String(msg.timeStr || "");
+                    row.appendChild(textSpan);
+                    row.appendChild(timeSpan);
+                } else {
+                    const meta = document.createElement("div");
+                    meta.className = "chat-msg-meta";
+
+                    const senderWrap = document.createElement("span");
+                    senderWrap.className = "chat-sender-wrap";
+
+                    const nameEl = document.createElement("span");
+                    nameEl.className = "chat-sender-name";
+                    if (msg.senderColor) nameEl.style.color = msg.senderColor;
+                    nameEl.textContent = String(msg.senderName || "Thuyền Trưởng");
+                    senderWrap.appendChild(nameEl);
+
+                    if (isMe) {
+                        const meTag = document.createElement("span");
+                        meTag.className = "chat-sender-tag";
+                        meTag.textContent = "[Bạn]";
+                        senderWrap.appendChild(meTag);
+                    }
+                    if (msg.isHost) {
+                        const hostTag = document.createElement("span");
+                        hostTag.className = "chat-sender-tag is-host";
+                        hostTag.textContent = "[Chủ phòng]";
+                        senderWrap.appendChild(hostTag);
+                    }
+
+                    const timeEl = document.createElement("span");
+                    timeEl.className = "chat-msg-time";
+                    timeEl.textContent = String(msg.timeStr || "");
+
+                    meta.appendChild(senderWrap);
+                    meta.appendChild(timeEl);
+
+                    const bodyEl = document.createElement("div");
+                    bodyEl.className = "chat-msg-text";
+                    bodyEl.textContent = String(msg.message || "");
+
+                    row.appendChild(meta);
+                    row.appendChild(bodyEl);
+                }
+
+                box.appendChild(row);
+            });
+
+            box.scrollTop = box.scrollHeight;
+        });
+    }
+
+    toggleInMatchChatBox(ev) {
+        if (ev) ev.stopPropagation();
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+        if (this.isMyTurn()) this.recordPlayerInteraction();
+
+        const panel = document.getElementById("inmatch-chat-panel");
+        if (!panel) return;
+        const willOpen = panel.classList.contains("hidden");
+        if (!willOpen) {
+            this.closeInMatchChatBox();
+            return;
+        }
+        this.isInMatchChatOpen = true;
+        this.roomChatUnreadCount = 0;
+        this.updateChatUnreadBadgeUI();
+
+        const roomTag = document.getElementById("inmatch-chat-room-tag");
+        if (roomTag) {
+            roomTag.textContent = this.roomState && this.roomState.code
+                ? `Phòng ${this.roomState.code}`
+                : (this.sandboxMode ? "Sandbox" : "Cục bộ");
+        }
+        const sbNote = document.getElementById("inmatch-chat-sandbox-note");
+        if (sbNote) {
+            sbNote.classList.toggle("hidden", !(this.sandboxMode || !this.roomState || !this.roomState.code));
+        }
+
+        panel.classList.remove("hidden");
+        this.renderRoomChatMessages("inmatch");
+        const inp = document.getElementById("inmatch-chat-input");
+        if (inp) setTimeout(() => inp.focus(), 30);
+    }
+
+    closeInMatchChatBox() {
+        this.isInMatchChatOpen = false;
+        this.closeAllQuickChatPopovers();
+        const panel = document.getElementById("inmatch-chat-panel");
+        if (panel) panel.classList.add("hidden");
+        const inp = document.getElementById("inmatch-chat-input");
+        if (inp && typeof document !== "undefined" && document.activeElement === inp) {
+            inp.blur();
+        }
+        this.updateChatUnreadBadgeUI();
+    }
+
+    submitLobbyChat() {
+        const inp = document.getElementById("lobby-chat-input");
+        if (!inp) return;
+        const text = inp.value;
+        if (Date.now() < (this.chatSpamCooldownUntil || 0)) {
+            this.updateChatSpamCooldownUI();
+            return;
+        }
+        if (!String(text || "").trim()) return;
+        inp.value = "";
+        this.updateChatCharCounter("lobby", "");
+        this.sendRoomChatMessage(text);
+        inp.focus();
+    }
+
+    submitInMatchChat() {
+        const inp = document.getElementById("inmatch-chat-input");
+        if (!inp) return;
+        const text = inp.value;
+        if (Date.now() < (this.chatSpamCooldownUntil || 0)) {
+            this.updateChatSpamCooldownUI();
+            return;
+        }
+        if (!String(text || "").trim()) return;
+        inp.value = "";
+        this.updateChatCharCounter("inmatch", "");
+        this.sendRoomChatMessage(text);
+        inp.focus();
+    }
+
+    sendQuickChatPreset(text) {
+        this.closeAllQuickChatPopovers();
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+        this.sendRoomChatMessage(text);
+    }
+
+    async sendRoomChatMessage(rawText) {
+        const clean = String(rawText || "").trim().slice(0, 250);
+        if (!clean) return;
+
+        const nowMs = Date.now();
+        if (nowMs < (this.chatSpamCooldownUntil || 0)) {
+            this.updateChatSpamCooldownUI();
+            return;
+        }
+        // Reset consecutive counter if paused > 10s
+        if (nowMs - (this.lastChatSentAt || 0) > 10000) {
+            this.chatConsecutiveCount = 0;
+        }
+        // Max 4 consecutive messages -> 5th triggers 10s spam cooldown!
+        if ((this.chatConsecutiveCount || 0) >= 4) {
+            this.startChatSpamCooldown(10);
+            return;
+        }
+        if (nowMs - (this.lastChatSentAt || 0) < 250) {
+            return;
+        }
+        this.lastChatSentAt = nowMs;
+        this.chatConsecutiveCount = (this.chatConsecutiveCount || 0) + 1;
+
+        if (this.isMyTurn()) {
+            this.recordPlayerInteraction();
+        }
+
+        const localP = this.getLocalPlayer();
+        const senderName = (localP && localP.name) || (this.roomState && this.roomState.localPlayerName) || "Thuyền Trưởng";
+        const senderColor = (localP && localP.color) || "#F2C96B";
+
+        if (!this.roomState || !this.roomState.code) {
+            const d = new Date(nowMs);
+            const timeStr = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+            this.handleIncomingChatMessages([{
+                id: `local_${nowMs}_${Math.random().toString(36).slice(2, 6)}`,
+                roomCode: "LOCAL",
+                senderId: this.clientId,
+                senderName,
+                senderColor,
+                isHost: true,
+                isSystem: false,
+                message: clean,
+                timeStr,
+                timestamp: nowMs
+            }], false);
+            return;
+        }
+
+        try {
+            const resp = await fetch("/api/room/chat/send", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    roomCode: this.roomState.code,
+                    clientId: this.clientId,
+                    senderName,
+                    message: clean
+                })
+            });
+            const data = await resp.json();
+            if (data && data.ok && data.message) {
+                this.handleIncomingChatMessages([data.message], false);
+            } else if (data && data.spamCooldown) {
+                this.startChatSpamCooldown(data.remainingSec || 10);
+            } else if (data && data.rateLimited) {
+                this.showToast("⏳ Bạn nhắn hơi nhanh, vui lòng đợi chút!");
+            }
+        } catch (e) {
+            this.showToast("⚠️ Không thể gửi tin nhắn lúc này, vui lòng thử lại.");
+        }
+    }
+
+    // ========================================================================
+    // QUICK EMOTES ON THE SEA (💬 -> REAL-TIME ROOM CHAT PANEL)
     // ========================================================================
     toggleEmoteMenu(ev) {
-        if (ev) ev.stopPropagation();
-        window.SFX.playClick();
-        const menu = document.getElementById("quick-emote-menu");
-        if (menu) menu.classList.toggle("hidden");
+        return this.toggleInMatchChatBox(ev);
     }
 
     sendQuickEmote(text) {
@@ -2426,6 +3458,164 @@ class GoldenJourneyGame {
         return chosen;
     }
 
+    // ------------------------------------------------------------------------
+    // MỤC 4A: BALANCED CHARTER-BASED SPAWN SELECTION (5+1 REGIONS)
+    // ------------------------------------------------------------------------
+    pickRegionalVesselTitle(regionId, usedVesselTitles = new Set()) {
+        const pools = (window.GAME_DATA && window.GAME_DATA.regionVesselNames) || {
+            0: ["Tàu Than Cái Lân", "Tàu Vịnh Hạ Long", "Tàu Hải Trình Vân Đồn"],
+            1: ["Tàu Bạch Đằng", "Tàu Cảng Hải Phòng", "Tàu Viễn Dương Hồng Hà"],
+            2: ["Tàu Tiên Sa", "Tàu Sông Hàn", "Tàu Nghinh Phong Miền Trung"],
+            3: ["Tàu Thị Nại", "Tàu Hàng Quy Nhơn", "Tàu Cao Nguyên Hướng Biển"],
+            4: ["Tàu Hàng Cái Mép", "Tàu Cửa Thị Vải", "Tàu Viễn Hải Sài Gòn"],
+            5: ["Tàu Tây Đô", "Tàu Hậu Giang", "Tàu Phương Nam Cửu Long"]
+        };
+        const targetRegion = (regionId !== undefined && regionId !== null && pools[regionId]) ? regionId : 4;
+        const primaryPool = pools[targetRegion] || pools[4] || ["Tàu Viễn Hải Sài Gòn"];
+        const availablePrimary = primaryPool.filter(name => !usedVesselTitles.has(name));
+        let chosen = null;
+        if (availablePrimary.length > 0) {
+            chosen = availablePrimary[Math.floor(Math.random() * availablePrimary.length)];
+        } else {
+            const allNames = Object.values(pools).flat();
+            const availableAny = allNames.filter(name => !usedVesselTitles.has(name));
+            chosen = availableAny.length > 0
+                ? availableAny[Math.floor(Math.random() * availableAny.length)]
+                : primaryPool[0];
+        }
+        usedVesselTitles.add(chosen);
+        return chosen;
+    }
+
+    findBalancedSpawnHexForRegion(regionId, occupiedHexes = new Set()) {
+        const tiles = (this.world && Array.isArray(this.world.hexTiles)) ? this.world.hexTiles : [];
+        const targetRegionId = (regionId !== undefined && regionId !== null) ? regionId : 4; // Fallback: Đông Nam Bộ (Cái Mép)
+        const portTile = tiles.find(t => t.isPort && t.regionId === targetRegionId)
+            || tiles.find(t => t.isPort && t.regionId === 4)
+            || tiles.find(t => t.isPort);
+
+        const tier1Monuments = tiles.filter(t => t.monumentId && t.monumentTier === 1);
+        const protectedMonuments = [...tier1Monuments];
+        // Đặc biệt tránh đặt tàu Vùng 2 sát Phong Nha hoặc tàu Vùng 4/5 sát Bến Nhà Rồng
+        const extraGuardIds = targetRegionId === 2 ? ["mon_phongnha"] : ((targetRegionId === 4 || targetRegionId === 5) ? ["mon_bennharong"] : []);
+        extraGuardIds.forEach(mId => {
+            const mt = tiles.find(t => t.monumentId === mId);
+            if (mt && !protectedMonuments.includes(mt)) protectedMonuments.push(mt);
+        });
+
+        const resourceNodes = tiles.filter(t => Boolean(t.resourceType));
+
+        const isCleanSeaHex = (t) => Boolean(
+            t &&
+            t.navigable &&
+            !t.isReef &&
+            !t.monumentId &&
+            !t.isPort &&
+            !t.resourceType &&
+            !t.hasNPC &&
+            !occupiedHexes.has(`${t.q},${t.r}`)
+        );
+
+        const countOpenSeaNeighbors = (t) => {
+            if (!this.world || !this.world.hexMap) return 0;
+            const dirs = [[1, 0], [1, -1], [0, -1], [-1, 0], [-1, 1], [0, 1]];
+            let cnt = 0;
+            for (const [dq, dr] of dirs) {
+                const nb = this.world.hexMap.get(`${t.q + dq},${t.r + dr}`);
+                if (nb && nb.navigable && !nb.isReef) cnt++;
+            }
+            return cnt;
+        };
+
+        const minDistTo = (t, list) => {
+            if (!list || list.length === 0) return 99;
+            let best = 99;
+            for (const item of list) {
+                const d = this.hexDistance(t.q, t.r, item.q, item.r);
+                if (d < best) best = d;
+            }
+            return best;
+        };
+
+        const hasResourceInBand = (t, minR, maxR) => {
+            return resourceNodes.some(rn => {
+                const d = this.hexDistance(t.q, t.r, rn.q, rn.r);
+                return d >= minR && d <= maxR;
+            });
+        };
+
+        const cleanSeaTiles = tiles.filter(isCleanSeaHex);
+        if (!portTile || cleanSeaTiles.length === 0) {
+            const fallback = this.generateFairOuterRimSpawns(1)[0] || { q: 0, r: 0 };
+            occupiedHexes.add(`${fallback.q},${fallback.r}`);
+            return fallback;
+        }
+
+        const scoreCandidate = (t, distPort) => {
+            let sc = 0;
+            // Ưu tiên cách cảng nhà đúng 1 ô bước đi (tối đa 2 ô nếu ô kề bị vướng)
+            sc += (distPort === 1) ? 60 : (distPort === 2 ? 32 : Math.max(0, 20 - distPort * 5));
+            // Ưu tiên hướng lệch ra ngoài khơi (+X / nhiều ô biển mở xung quanh)
+            if (typeof t.x === "number" && typeof portTile.x === "number" && t.x > portTile.x) {
+                sc += 24;
+            }
+            sc += countOpenSeaNeighbors(t) * 6;
+            if (hasResourceInBand(t, 2, 4)) sc += 25;
+            return sc;
+        };
+
+        // Pass 1 (Chuẩn đầy đủ): Cách Cảng 1–2 ô, cách tất cả Di tích Cấp 1 (và điểm bảo vệ) >= 3 ô, có >= 1 mỏ trong bán kính 2–4 ô
+        const pickBestFrom = (filterFn) => {
+            let bestTile = null;
+            let bestScore = -Infinity;
+            for (const t of cleanSeaTiles) {
+                const dPort = this.hexDistance(t.q, t.r, portTile.q, portTile.r);
+                if (!filterFn(t, dPort)) continue;
+                const sc = scoreCandidate(t, dPort);
+                if (sc > bestScore) {
+                    bestScore = sc;
+                    bestTile = t;
+                }
+            }
+            return bestTile;
+        };
+
+        let chosen =
+            pickBestFrom((t, dPort) => dPort >= 1 && dPort <= 2 && minDistTo(t, protectedMonuments) >= 3 && hasResourceInBand(t, 2, 4)) ||
+            pickBestFrom((t, dPort) => dPort >= 1 && dPort <= 2 && minDistTo(t, protectedMonuments) >= 3) ||
+            pickBestFrom((t, dPort) => dPort >= 1 && dPort <= 3 && minDistTo(t, protectedMonuments) >= 3) ||
+            pickBestFrom((t, dPort) => dPort >= 1 && dPort <= 3) ||
+            cleanSeaTiles[0];
+
+        occupiedHexes.add(`${chosen.q},${chosen.r}`);
+        return {
+            q: chosen.q,
+            r: chosen.r,
+            regionId: targetRegionId,
+            portName: portTile.portName || "Thương Cảng"
+        };
+    }
+
+    announceLocalPlayerSpawnAndFocus() {
+        const localP = this.getLocalPlayer() || this.getActivePlayer();
+        if (!localP) return;
+        if (this.world && typeof this.world.focusCameraOnHex === "function") {
+            this.world.focusCameraOnHex(localP.q, localP.r);
+        }
+        const regId = (localP.charterRegionId !== undefined && localP.charterRegionId !== null) ? localP.charterRegionId : 4;
+        const regName = this.getRegionShortName(regId);
+        const portTile = (this.world && Array.isArray(this.world.hexTiles))
+            ? this.world.hexTiles.find(t => t.isPort && t.regionId === regId)
+            : null;
+        const shortPortMap = { 0: "Cái Lân", 1: "Hải Phòng", 2: "Tiên Sa", 3: "Quy Nhơn", 4: "Cái Mép", 5: "Cần Thơ" };
+        const portShort = shortPortMap[regId] || (portTile ? portTile.portName : "Thương Cảng");
+
+        const msg = (localP.charterRegionId !== undefined && localP.charterRegionId !== null)
+            ? `⛵ Xuất phát tại vùng biển ${regName} — Cảng nhà của bạn: 👑 ${portShort} (Miễn thuế 0💰)`
+            : `⛵ Xuất phát tại vùng biển Đông Nam Bộ — Cảng Tự Do: 🌐 ${portShort} (Miễn thuế 0💰)`;
+        this.showToast(msg);
+    }
+
     initializeMatchBoardAndShips(totalPlayers = 4, humanCount = 1, customConfigs = null) {
         this.roundNumber = 1;
         this.activePlayerIdx = 0;
@@ -2434,6 +3624,21 @@ class GoldenJourneyGame {
 
         this.matchElapsedSec = 0;
         this.earlyLockReleased = Boolean(this.sandboxMode);
+        this.exhaustedTiersNotified = new Set();
+        this.blockedMineIds = [];
+        this.finalFiveMinNotified = false;
+        this.sprint12NotifiedIds = new Set();
+        this.sandboxAllowTimeout = false;
+        // Mục 4D: Chống AFK 50s (45s + 5s cảnh báo), Đóng băng đồng hồ 45:00 & Tự chuyển lượt 5s khi 0 AP
+        this.lastInteractionAt = Date.now();
+        this.lastGameplayActionAt = Date.now();
+        this.isMatchClockFrozen = false;
+        this.afkWarningRemainingSec = null;
+        this.afkAutoNoticeShown = false;
+        this.afkAutoNoticeShownAt = 0;
+        this.hideAfkAutoNotice();
+        this.zeroApCountdownSec = null;
+        this.zeroApCountdownInterval = null;
         this.currentWeatherPhase = "sunny";
         this.thunderstormChallengeTriggered = false;
         this.portResetRemainingSec = this.portResetIntervalSec;
@@ -2444,6 +3649,7 @@ class GoldenJourneyGame {
         this.monumentAssignments = this.randomizeMonumentTiers();
         this.world.buildBoard(this.monumentAssignments);
         this.world.setWeatherMode("sunny");
+        this.syncMonumentVisuals3D();
         this.resetAllPortInventories(false);
         this.resetAllPortResourceStocks(false);
         this.startMatchClockAndWeatherEngine();
@@ -2458,13 +3664,15 @@ class GoldenJourneyGame {
         }
 
         this.players = [];
-        // Mục 3B-1: Chia ngẫu nhiên Thương quyền 5 vùng (0, 1, 2, 3, 5) cho các người chơi (mỗi người tối đa 1 vùng);
+        // Mục 3B-1 & 4A: Chia ngẫu nhiên Thương quyền 5 vùng (0, 1, 2, 3, 5) cho các tàu và đặt mỗi tàu tại ô biển cân bằng gần Cảng nhà!
         // Riêng Vùng 4 (Đông Nam Bộ) luôn là "🌐 Vùng Tự Do (Thuế 0 Xu)"!
         const charterPool = [0, 1, 2, 3, 5];
         for (let ci = charterPool.length - 1; ci > 0; ci--) {
             const cj = Math.floor(Math.random() * (ci + 1));
             [charterPool[ci], charterPool[cj]] = [charterPool[cj], charterPool[ci]];
         }
+        const occupiedSpawnHexes = new Set();
+        const usedVesselTitles = new Set();
 
         for (let i = 0; i < totalPlayers; i++) {
             const archIdx = randomArchIndices[i % randomArchIndices.length];
@@ -2477,6 +3685,8 @@ class GoldenJourneyGame {
                 : (!isAI ? this.clientId : null);
             const shipKey = clientId ? `client_${clientId}` : `seat_${seatIdx}`;
             const assignedCharter = charterPool[i] !== undefined ? charterPool[i] : null;
+            const balancedSpawn = this.findBalancedSpawnHexForRegion(assignedCharter, occupiedSpawnHexes);
+            const vesselTitle = this.pickRegionalVesselTitle(assignedCharter, usedVesselTitles);
 
             this.players.push({
                 id: i,
@@ -2484,13 +3694,13 @@ class GoldenJourneyGame {
                 clientId: clientId,
                 shipKey: shipKey,
                 name: pName,
-                vesselTitle: arch.vesselTitle,
+                vesselTitle: vesselTitle,
                 archetypeId: archIdx,
                 color: arch.color,
                 isAI: isAI,
                 eliminated: false,
-                q: fairSpawns[i].q,
-                r: fairSpawns[i].r,
+                q: balancedSpawn.q,
+                r: balancedSpawn.r,
                 hp: 5,
                 maxHp: 5,
                 coins: 3,
@@ -2533,7 +3743,7 @@ class GoldenJourneyGame {
         this.refreshReachableHexes();
 
         const roomTag = this.roomState.code ? ` [Phòng: ${this.roomState.code}]` : "";
-        const charterSummary = this.players.map(pl => `${pl.name}: ${this.getRegionShortName(pl.charterRegionId)}`).join(" • ");
+        const charterSummary = this.players.map(pl => `${pl.name} (${pl.vesselTitle}): ${this.getRegionShortName(pl.charterRegionId)}`).join(" • ");
         this.logEvent(`⚓ Khởi tạo bản đồ chung${roomTag} (${totalPlayers} Hải đội • Vốn 3 Xu • Kho 12→16 ô • Trần 30 Xu)!`);
         this.logEvent(`📜 Thương quyền 5+1: ${charterSummary} | 🌐 Đông Nam Bộ luôn là Vùng Tự Do (Thuế 0 Xu)!`);
         this.updateUI();
@@ -2696,7 +3906,13 @@ class GoldenJourneyGame {
     // ------------------------------------------------------------------------
     beginTurn() {
         clearTimeout(this.autoEndTurnTimer);
+        this.clearZeroApAutoPassCountdown();
+        this.lastInteractionAt = Date.now();
+        this.lastGameplayActionAt = Date.now();
+        this.isMatchClockFrozen = false;
+        this.hideAfkWarningBanner();
         const p = this.getActivePlayer();
+        this.syncAfkAutoNoticeUI();
         if (!p) return;
         if (p.eliminated) {
             this.advanceToNextPlayer();
@@ -2741,34 +3957,341 @@ class GoldenJourneyGame {
         }
     }
 
-    checkAutoEndTurnIfNoAP() {
+    clearZeroApAutoPassCountdown() {
         clearTimeout(this.autoEndTurnTimer);
-        if (!this.isGameStarted || this.isBusy) return;
-        if (this.sandboxInfiniteMove) return;
-        if (!this.isMyTurn()) return;
-        if (this.isModalOpen()) return;
+        this.autoEndTurnTimer = null;
+        clearInterval(this.zeroApCountdownInterval);
+        this.zeroApCountdownInterval = null;
+        this.zeroApCountdownSec = null;
+        this.zeroApCountdownMode = null;
+        const endTurnBtn = document.getElementById("btn-end-turn");
+        if (endTurnBtn) {
+            endTurnBtn.textContent = "⏭️ Xong Lượt";
+            endTurnBtn.title = "Kết thúc lượt hiện tại";
+            endTurnBtn.classList.remove("is-countdown");
+        }
+    }
+
+    recordPlayerInteraction() {
+        this.lastInteractionAt = Date.now();
+        if (this.afkWarningRemainingSec !== null) {
+            this.hideAfkWarningBanner();
+        }
+    }
+
+    recordGameplayAction() {
+        this.lastInteractionAt = Date.now();
+        this.lastGameplayActionAt = Date.now();
+        if (this.isMatchClockFrozen) {
+            this.isMatchClockFrozen = false;
+            this.updateClockAndTickerUI();
+        }
+        if (this.afkWarningRemainingSec !== null) {
+            this.hideAfkWarningBanner();
+        }
+    }
+
+    hideAfkWarningBanner() {
+        this.afkWarningRemainingSec = null;
+        const banner = document.getElementById("afk-warning-banner");
+        if (banner) banner.classList.add("hidden");
+    }
+
+    showAfkAutoNotice() {
+        if (!this.afkAutoNoticeShown) {
+            this.afkAutoNoticeShown = true;
+            this.afkAutoNoticeShownAt = Date.now();
+        }
+        const notice = document.getElementById("afk-auto-notice");
+        if (notice) notice.classList.remove("hidden");
+    }
+
+    hideAfkAutoNotice() {
+        this.afkAutoNoticeShown = false;
+        this.afkAutoNoticeShownAt = 0;
+        const notice = document.getElementById("afk-auto-notice");
+        if (notice) notice.classList.add("hidden");
+    }
+
+    syncAfkAutoNoticeUI() {
+        const notice = document.getElementById("afk-auto-notice");
+        const localP = this.getLocalPlayer();
+        const activeP = this.getActivePlayer();
+        const shouldShow = Boolean(
+            this.isGameStarted &&
+            !this.sandboxMode &&
+            !this.matchWinner &&
+            localP &&
+            !localP.eliminated &&
+            localP.afkBotTakeover &&
+            activeP &&
+            activeP.id === localP.id
+        );
+        if (shouldShow) {
+            if (!this.afkAutoNoticeShown) {
+                this.afkAutoNoticeShown = true;
+                this.afkAutoNoticeShownAt = Date.now();
+            }
+            if (notice) notice.classList.remove("hidden");
+        } else {
+            this.afkAutoNoticeShown = false;
+            this.afkAutoNoticeShownAt = 0;
+            if (notice) notice.classList.add("hidden");
+        }
+    }
+
+    confirmStillPlayingFromAFK() {
+        this.recordPlayerInteraction();
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+        this.showToast("✅ Đã xác nhận bạn vẫn đang chơi!");
+    }
+
+    triggerAfkBotTakeover(player) {
+        if (!player || player.isAI || player.eliminated) return;
+        this.hideAfkWarningBanner();
+        this.clearZeroApAutoPassCountdown();
+        this.cancelLockedMovePath(false);
+        player.afkBotTakeover = true;
+        player.isAI = true;
+        const localP = this.getLocalPlayer();
+        const isLocalTarget = Boolean(localP && localP.id === player.id);
+        if (isLocalTarget) {
+            this.showAfkAutoNotice();
+        }
+        const msg = `🤖 ${player.name} đứng yên quá 50s — Tàu Máy tạm tiếp quản điều khiển (không phạt Xu/HP)!`;
+        this.logEvent(msg);
+        this.addTradeBulletinNotice(msg);
+        if (!isLocalTarget) {
+            this.showToast(msg);
+        }
+        this.updateUI();
+        this.syncMultiplayerGameState();
+        if (!this.roomState.code || this.roomState.isHost) {
+            this._scheduledBotTurnKey = null;
+            this.scheduleHostBotTurnIfNeeded();
+        }
+    }
+
+    reclaimControlFromAFKBot() {
+        this.hideAfkAutoNotice();
+        const localP = this.getLocalPlayer();
+        if (!localP || !localP.afkBotTakeover) return;
+        localP.afkBotTakeover = false;
+        localP.isAI = false;
+        // Dừng hẳn luồng tự lái của Bot nếu đang chờ hoặc vừa kết thúc bước đi
+        clearTimeout(this.aiTurnTimer);
+        clearTimeout(this.aiPostMoveTimer);
+        this._scheduledBotTurnKey = null;
+        this.clearZeroApAutoPassCountdown();
+        this.lastInteractionAt = Date.now();
+        this.lastGameplayActionAt = Date.now();
+        this.isMatchClockFrozen = false;
+        this.hideAfkWarningBanner();
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+        const msg = "✋ Bạn đã bấm vào màn hình — Đã lấy lại quyền lái!";
+        this.logEvent(`✋ ${localP.name} đã tương tác trở lại và lấy lại quyền tự điều khiển tàu!`);
+        this.showToast(msg);
+        this.refreshReachableHexes();
+        this.updateUI();
+        this.syncMultiplayerGameState();
+    }
+
+    isMovementExhaustedAtSea(player) {
+        if (!player || player.isAI || player.eliminated) return false;
+        // (d) Không có Quiz đang chờ trả lời (kể cả khi thu gọn) và không đang mở cửa sổ Thương Cảng
+        if (this.hasActiveUnansweredQuiz() || this.currentPortTile) return false;
+
+        // (a) Đã dùng hết AP tối đa cho phép di chuyển trong lượt HOẶC không còn ô biển hợp lệ nào đi tiếp được
+        const remainingSteps = this.getRemainingHexSteps(player);
+        if (remainingSteps > 0) {
+            const reach = this.computeNavigablePaths(player.q, player.r, remainingSteps);
+            if (reach && reach.size > 0) return false;
+        }
+
+        // (c) KHÔNG loại trừ nút Sửa Tàu (vẫn chạy nhịp 5s chờ + 5s đếm ngược để người chơi chọn sửa hoặc bỏ qua)
+
+        // (b) Tàu đang đứng ở ô biển trống — không có tương tác khả dụng tại chỗ (Mỏ / Cảng / Di tích / Tàu FDI)
+        const curTile = this.getCurrentTile(player);
+        if (curTile) {
+            const canInteractAP = this.canSpendInteractiveAP(player);
+
+            // Thương Cảng tại chỗ (bị chặn thuế 0 Xu coi như trống)
+            if (curTile.isPort && (canInteractAP || this.portApDeducted)) {
+                const owner = this.getPortCharterOwner(curTile.regionId);
+                const needsTax = Boolean(owner && owner.id !== player.id && !this.portTaxPaidThisTurn);
+                if (!needsTax || (player.coins || 0) >= 1) return false;
+            }
+
+            // Mỏ tài nguyên tại chỗ (mỏ bị Giông Bão phong tỏa, đang hồi cooldown, hoặc kho đầy coi như trống)
+            if (curTile.resourceType && canInteractAP) {
+                const mineBlocked = this.isMineBlockedByStorm(curTile);
+                const onCooldown = (curTile.resourceCooldown || 0) > 0;
+                const cargoFull = this.getCargoCount(player) >= this.getMaxCargo(player);
+                if (!mineBlocked && !onCooldown && !cargoFull) return false;
+            }
+
+            // Di tích tại chỗ (khóa 08:30, đã chinh phục, hoặc chưa đủ Key/tài nguyên coi như trống)
+            if (curTile.monumentId && canInteractAP && !curTile.monumentLocked) {
+                const tier = curTile.monumentTier || 1;
+                const earlyLocked = (tier >= 2 && this.isEarlyGameMonumentLockActive());
+                const tier1Blocked = (tier === 1 && (player.tier1Visited || 0) >= 1);
+                const alreadyOwned = (player.relics || []).some(r => r.id === curTile.monumentId);
+                const feeCoins = tier === 1 ? 2 : (tier === 2 ? 3 : 6);
+                const feeFood = tier;
+                const feeIron = tier === 3 ? 1 : 0;
+                const hasReqs = (player.keys && (player.keys[tier] || 0) >= 1) &&
+                    (player.coins || 0) >= feeCoins &&
+                    (player.food || 0) >= feeFood &&
+                    (player.iron || 0) >= feeIron;
+                if (!earlyLocked && !tier1Blocked && !alreadyOwned && hasReqs) return false;
+            }
+
+            // Sự kiện Tàu FDI tại chỗ
+            if (curTile.hasNPC && canInteractAP) return false;
+        }
+
+        return true;
+    }
+
+    hasNoRemainingTurnActions(player) {
+        return this.isMovementExhaustedAtSea(player);
+    }
+
+    checkAutoEndTurnIfNoAP(forceRestart = false) {
+        if (!this.isGameStarted || this.isBusy) {
+            this.clearZeroApAutoPassCountdown();
+            return;
+        }
+        if (this.sandboxInfiniteMove) {
+            this.clearZeroApAutoPassCountdown();
+            return;
+        }
+        if (!this.isMyTurn()) {
+            this.clearZeroApAutoPassCountdown();
+            return;
+        }
 
         const p = this.getActivePlayer();
-        if (!p || p.isAI || p.eliminated) return;
+        if (!p || p.isAI || p.eliminated) {
+            this.clearZeroApAutoPassCountdown();
+            return;
+        }
 
         // During Super Typhoon Yagi, spending 4 AP triggers the mandatory Yagi Storm Quiz!
-        if (this.currentWeatherPhase === "super_typhoon_yagi" && ((p.maxTurnAp || 5) - p.ap) >= 4 && !p.yagiQuizTriggeredThisTurn) {
+        if (!this.isModalOpen() && this.currentWeatherPhase === "super_typhoon_yagi" && ((p.maxTurnAp || 5) - p.ap) >= 4 && !p.yagiQuizTriggeredThisTurn) {
+            this.clearZeroApAutoPassCountdown();
             this.triggerYagiTurnQuiz(p);
             return;
         }
 
-        // Player has 0 AP and no leftover hex move credits -> Automatically end turn!
-        if (p.ap <= 0 && p.hexMoveCredits <= 0) {
-            this.autoEndTurnTimer = setTimeout(() => {
-                if (this.isMyTurn() && !this.isBusy && !this.isModalOpen() && !this.sandboxInfiniteMove) {
-                    const curP = this.getActivePlayer();
-                    if (curP && curP.ap <= 0 && curP.hexMoveCredits <= 0) {
-                        this.showToast(`⏭️ ${curP.name} đã sử dụng hết 5/5 AP — Tự động chuyển lượt!`);
-                        this.endPlayerTurn(true);
-                    }
-                }
-            }, 650);
+        // Tự chuyển lượt chỉ chạy ở chế độ PvP (tắt trong Sandbox) & tạm hoãn khi đang mở Thương Cảng / chờ Quiz
+        if (this.sandboxMode || this.hasActiveUnansweredQuiz() || this.currentPortTile) {
+            this.clearZeroApAutoPassCountdown();
+            return;
         }
+
+        // TRƯỜNG HỢP 1: Hết sạch toàn bộ AP (AP === 0) & không mở modal -> Đếm ngược 5 giây
+        if (p.ap <= 0 && p.hexMoveCredits <= 0) {
+            if (this.isModalOpen()) {
+                this.clearZeroApAutoPassCountdown();
+                return;
+            }
+            this.clearZeroApAutoPassCountdown();
+            this.zeroApCountdownMode = "zero_ap";
+            this.zeroApCountdownSec = 5;
+            const updateBtn5 = () => {
+                const endTurnBtn = document.getElementById("btn-end-turn");
+                if (endTurnBtn && this.zeroApCountdownSec !== null) {
+                    endTurnBtn.textContent = `⏭️ 0 AP • ${this.zeroApCountdownSec}s`;
+                    endTurnBtn.title = `Đã dùng hết 0 AP — Tự động chuyển lượt sau ${this.zeroApCountdownSec}s`;
+                    endTurnBtn.classList.add("is-countdown");
+                }
+            };
+            updateBtn5();
+            this.zeroApCountdownInterval = setInterval(() => {
+                if (!this.isMyTurn() || this.isBusy || this.hasActiveUnansweredQuiz() || this.currentPortTile || this.isModalOpen() || this.sandboxMode || this.sandboxInfiniteMove) {
+                    this.clearZeroApAutoPassCountdown();
+                    return;
+                }
+                const curP = this.getActivePlayer();
+                if (!curP || curP.ap > 0 || curP.hexMoveCredits > 0) {
+                    this.clearZeroApAutoPassCountdown();
+                    return;
+                }
+                this.zeroApCountdownSec -= 1;
+                if (this.zeroApCountdownSec <= 0) {
+                    this.clearZeroApAutoPassCountdown();
+                    this.cancelLockedMovePath(false);
+                    this.showToast(`⏭️ ${curP.name} đã hết AP — Tự động chuyển lượt!`);
+                    this.endPlayerTurn(true);
+                } else {
+                    updateBtn5();
+                }
+            }, 1000);
+            return;
+        }
+
+        // TRƯỜNG HỢP 2: Còn AP dư (AP > 0) nhưng đã hết AP di chuyển giữa biển trống -> 5s chờ im + 5s hiện đếm ngược!
+        if (p.ap > 0 && this.isMovementExhaustedAtSea(p)) {
+            if (!forceRestart && this.zeroApCountdownMode === "sea_exhausted" && (this.autoEndTurnTimer || this.zeroApCountdownInterval)) {
+                return; // Giữ nguyên nhịp 5s chờ + 5s đếm ngược đang chạy
+            }
+            this.clearZeroApAutoPassCountdown();
+            this.zeroApCountdownMode = "sea_exhausted";
+
+            // Giai đoạn 1 (0s -> 5s): Chờ im 5 giây (nút giữ nguyên "⏭️ Xong Lượt" để người chơi thoải mái bấm Sửa Tàu hoặc Xong Lượt)
+            this.autoEndTurnTimer = setTimeout(() => {
+                this.autoEndTurnTimer = null;
+                if (!this.isMyTurn() || this.isBusy || this.sandboxMode || this.sandboxInfiniteMove) {
+                    this.clearZeroApAutoPassCountdown();
+                    return;
+                }
+                const curP = this.getActivePlayer();
+                if (!curP || curP.ap <= 0 || !this.isMovementExhaustedAtSea(curP)) {
+                    this.clearZeroApAutoPassCountdown();
+                    return;
+                }
+
+                // Giai đoạn 2 (5s -> 10s): Bật hiển thị đếm ngược 5 -> 4 -> 3 -> 2 -> 1 ngay trên nút Xong Lượt
+                this.zeroApCountdownSec = 5;
+                const updateBtnSea = () => {
+                    const endTurnBtn = document.getElementById("btn-end-turn");
+                    if (endTurnBtn && this.zeroApCountdownSec !== null) {
+                        endTurnBtn.textContent = `⏭️ Tự xong ${this.zeroApCountdownSec}s`;
+                        endTurnBtn.title = `Đã hết AP di chuyển ở vùng biển trống — Tự động kết thúc lượt sau ${this.zeroApCountdownSec}s`;
+                        endTurnBtn.classList.add("is-countdown");
+                    }
+                };
+                updateBtnSea();
+
+                this.zeroApCountdownInterval = setInterval(() => {
+                    if (!this.isMyTurn() || this.isBusy || this.sandboxMode || this.sandboxInfiniteMove) {
+                        this.clearZeroApAutoPassCountdown();
+                        return;
+                    }
+                    const liveP = this.getActivePlayer();
+                    if (!liveP || liveP.ap <= 0 || !this.isMovementExhaustedAtSea(liveP)) {
+                        this.clearZeroApAutoPassCountdown();
+                        return;
+                    }
+                    this.zeroApCountdownSec -= 1;
+                    if (this.zeroApCountdownSec <= 0) {
+                        this.clearZeroApAutoPassCountdown();
+                        this.cancelLockedMovePath(false);
+                        if (this.isModalOpen()) this.closeModal();
+                        const logMsg = `⏭️ ${liveP.name} đã hết AP di chuyển giữa biển — Tự động chuyển lượt.`;
+                        this.logEvent(logMsg);
+                        this.showToast(logMsg);
+                        this.endPlayerTurn(true);
+                    } else {
+                        updateBtnSea();
+                    }
+                }, 1000);
+            }, 5000);
+            return;
+        }
+
+        this.clearZeroApAutoPassCountdown();
     }
 
     // ------------------------------------------------------------------------
@@ -2816,7 +4339,6 @@ class GoldenJourneyGame {
                 const nextTile = this.world.hexMap.get(key);
 
                 if (!nextTile || !nextTile.navigable) continue;
-                if (nextTile.stormRestricted && !this.sandboxInfiniteMove) continue;
 
                 const nextSteps = cur.steps + 1;
                 if (!bestDist.has(key) || bestDist.get(key) > nextSteps) {
@@ -2858,6 +4380,110 @@ class GoldenJourneyGame {
     }
 
     // ------------------------------------------------------------------------
+    // PATH PREVIEW METADATA (AP COST, REEF HITS, PORT TAX & DRAG NEIGHBORS)
+    // ------------------------------------------------------------------------
+    buildPathPreviewMeta(pathTiles, isCustomDrawn = false) {
+        const p = this.getActivePlayer();
+        const startTile = p ? this.getCurrentTile(p) : null;
+        let fullPath = Array.isArray(pathTiles) ? [...pathTiles] : [];
+
+        // Ensure hover paths start cleanly from the ship's current hex
+        if (startTile && fullPath.length > 0 && (fullPath[0].q !== startTile.q || fullPath[0].r !== startTile.r)) {
+            fullPath = [startTile, ...fullPath];
+        }
+
+        const stepTiles = fullPath.length > 1 ? fullPath.slice(1) : [];
+        const steps = stepTiles.length;
+        const stepsPerAp = this.currentWeatherPhase === "super_typhoon_yagi" ? 1 : 2;
+        const apCost = this.sandboxInfiniteMove ? 0 : Math.ceil(steps / stepsPerAp);
+        const reefHits = stepTiles.filter(t => t && t.isReef).length;
+
+        let portTaxMode = "none";
+        const dest = stepTiles.length > 0 ? stepTiles[stepTiles.length - 1] : null;
+        if (dest && dest.isPort && p) {
+            const owner = this.getPortCharterOwner(dest.regionId);
+            if (owner && owner.id !== p.id) {
+                portTaxMode = (p.coins || 0) < 1 ? "blocked0" : "pay1";
+            }
+        }
+
+        // Compute valid adjacent sea tiles when custom dragging so player sees where they can drag next
+        const nextNeighbors = [];
+        if (isCustomDrawn && p && this.world && this.world.hexMap) {
+            const maxSteps = this.getRemainingHexSteps(p);
+            const remaining = maxSteps - steps;
+            const lastTile = fullPath.length > 0 ? fullPath[fullPath.length - 1] : startTile;
+            const isDockStop = Boolean(
+                lastTile &&
+                steps > 0 &&
+                !this.sandboxInfiniteMove &&
+                (lastTile.monumentId || lastTile.isPort || lastTile.resourceType || lastTile.hasNPC)
+            );
+            if (lastTile && remaining > 0 && !isDockStop) {
+                const dirs = [[1, 0], [1, -1], [0, -1], [-1, 0], [-1, 1], [0, 1]];
+                dirs.forEach(([dq, dr]) => {
+                    const nb = this.world.hexMap.get(`${lastTile.q + dq},${lastTile.r + dr}`);
+                    if (!nb || !nb.navigable) return;
+                    if (fullPath.some(pt => pt.q === nb.q && pt.r === nb.r)) return;
+                    nextNeighbors.push(nb);
+                });
+            }
+        }
+
+        return {
+            fullPath,
+            steps,
+            apCost,
+            isInfiniteMove: Boolean(this.sandboxInfiniteMove),
+            reefHits,
+            portTaxMode,
+            nextNeighbors,
+            isLocked: Boolean(this.lockedMovePath && (!this.world || !this.world.isDrawingCustomPath))
+        };
+    }
+
+    lockMovePath(stepTiles, mode = "auto") {
+        const p = this.getActivePlayer();
+        if (!p || !Array.isArray(stepTiles) || stepTiles.length === 0) {
+            this.cancelLockedMovePath(false);
+            return false;
+        }
+        const startTile = this.getCurrentTile(p);
+        const destTile = stepTiles[stepTiles.length - 1];
+        this.lockedMovePath = {
+            mode: mode === "custom" ? "custom" : "auto",
+            startTile,
+            path: [...stepTiles],
+            destTile
+        };
+        if (this.world) {
+            this.world.isPathLocked = true;
+            this.world.isDrawingCustomPath = false;
+            this.world.showPathPreview(startTile ? [startTile, ...stepTiles] : [...stepTiles], mode === "custom");
+        }
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+        return true;
+    }
+
+    cancelLockedMovePath(showFeedback = false) {
+        const hadLocked = Boolean(this.lockedMovePath);
+        this.lockedMovePath = null;
+        this.lockedMovePath = null;
+        if (this.world) this.world.isPathLocked = false;
+        this.customDrawnPath = [];
+        if (this.world) {
+            this.world.isPathLocked = false;
+            this.world.isDrawingCustomPath = false;
+            this.world.isClickDrawMode = false;
+            this.world.clearPathPreview();
+        }
+        if (showFeedback && hadLocked) {
+            window.SFX && window.SFX.playClick && window.SFX.playClick();
+            this.showToast("↩️ Đã hủy đường đi đang chọn.");
+        }
+    }
+
+    // ------------------------------------------------------------------------
     // DOUBLE-CLICK + HOLD-DRAG MANUAL PATH DRAWING (STEER AROUND REEFS!)
     // ------------------------------------------------------------------------
     startCustomPathDrag(firstTile) {
@@ -2882,10 +4508,6 @@ class GoldenJourneyGame {
 
         const p = this.getActivePlayer();
         if (!p || !firstTile || !firstTile.navigable) return false;
-        if (firstTile.stormRestricted && !this.sandboxInfiniteMove) {
-            this.showToast("⛔ Ô tài nguyên này đang bị phong tỏa bởi Giông Bão!");
-            return false;
-        }
 
         const maxSteps = this.getRemainingHexSteps(p);
         if (maxSteps <= 0) {
@@ -2893,6 +4515,8 @@ class GoldenJourneyGame {
             return false;
         }
 
+        this.lockedMovePath = null;
+        if (this.world) this.world.isPathLocked = false;
         this.customDrawnPath = [];
         const distFromShip = this.hexDistance(p.q, p.r, firstTile.q, firstTile.r);
 
@@ -2916,7 +4540,6 @@ class GoldenJourneyGame {
 
     stepCustomPathDrag(tile) {
         if (!this.isGameStarted || !this.isMyTurn() || !tile || !tile.navigable) return;
-        if (tile.stormRestricted && !this.sandboxInfiniteMove) return;
 
         const p = this.getActivePlayer();
         if (!p) return;
@@ -2988,15 +4611,13 @@ class GoldenJourneyGame {
     commitCustomPathDrag() {
         const p = this.getActivePlayer();
         if (!p || !this.customDrawnPath || this.customDrawnPath.length === 0) {
-            this.customDrawnPath = [];
-            this.world.clearPathPreview();
+            this.cancelLockedMovePath(false);
             return;
         }
         const path = [...this.customDrawnPath];
-        const destTile = path[path.length - 1];
-        const steps = path.length;
         this.customDrawnPath = [];
-        this.movePlayerAlongRoute(p, destTile, steps, path);
+        // Releasing drag LOCKS the custom drawn path on board (does NOT move ship immediately!)
+        this.lockMovePath(path, "custom");
     }
 
     handleHexClick(tile) {
@@ -3029,19 +4650,16 @@ class GoldenJourneyGame {
             return;
         }
 
-        if (tile.stormRestricted && !this.sandboxInfiniteMove) {
-            this.showToast("⛔ Mỏ tài nguyên này đang bị phong tỏa bởi Giông Bão! Không thể di chuyển vào lúc này.");
-            return;
-        }
-
         const key = `${tile.q},${tile.r}`;
         if (tile.q === p.q && tile.r === p.r) {
+            this.cancelLockedMovePath(false);
             this.triggerContextualActionOnCurrentHex();
             return;
         }
 
         // Sandbox Click-to-Teleport mode: instantly teleport ship to clicked water hex!
         if (this.sandboxTeleport) {
+            this.cancelLockedMovePath(false);
             p.q = tile.q;
             p.r = tile.r;
             this.world.syncShipsSmoothly(this.players, this.getLocalPlayer());
@@ -3051,6 +4669,15 @@ class GoldenJourneyGame {
             this.updateUI();
             this.syncMultiplayerGameState();
             this.showToast(`⚡ [Sáng Tạo] Đã dịch chuyển tức thời tới ô (${tile.q}, ${tile.r})!`);
+            return;
+        }
+
+        // STEP 2 CONFIRMATION: Clicking the EXACT destination hex of the lockedMovePath executes the move!
+        if (this.lockedMovePath && this.lockedMovePath.destTile &&
+            this.lockedMovePath.destTile.q === tile.q && this.lockedMovePath.destTile.r === tile.r) {
+            const confirmed = this.lockedMovePath;
+            this.cancelLockedMovePath(false);
+            this.movePlayerAlongRoute(p, confirmed.destTile, confirmed.path.length, confirmed.path);
             return;
         }
 
@@ -3067,11 +4694,16 @@ class GoldenJourneyGame {
             return;
         }
 
+        // STEP 1 LOCK: Compute shortest path and lock preview on map (do NOT move immediately!)
         const routeInfo = this.world.reachablePaths.get(key);
-        this.movePlayerAlongRoute(p, tile, routeInfo.steps, routeInfo.path);
+        this.lockMovePath(routeInfo.path, "auto");
     }
 
     movePlayerAlongRoute(player, targetTile, stepsRequired, pathTiles, onAfterMove = null) {
+        if (!player.isAI) {
+            this.cancelLockedMovePath(false);
+            this.recordGameplayAction();
+        }
         const stepsPerAp = this.getStepsPerMoveAP();
         if (this.sandboxInfiniteMove && !player.isAI) {
             player.ap = Math.max(5, player.ap);
@@ -3200,6 +4832,7 @@ class GoldenJourneyGame {
         }
 
         this.spendInteractiveAP(p);
+        this.recordGameplayAction();
         p.coins -= 1;
         p.wood -= 1;
         p.hp = Math.min(p.maxHp, p.hp + 1);
@@ -3211,7 +4844,8 @@ class GoldenJourneyGame {
         this.showToast(`🛠️ Đã sửa thuyền +1 HP (${p.hp}/${p.maxHp} HP)!`);
         this.updateUI();
         this.syncMultiplayerGameState();
-        this.checkAutoEndTurnIfNoAP();
+        // Reset nhịp 5s chờ + 5s đếm ngược sau khi bấm Sửa Tàu (hoặc chuyển ngay sang đếm ngược 5s nếu AP về 0)
+        this.checkAutoEndTurnIfNoAP(true);
     }
 
     // ------------------------------------------------------------------------
@@ -3223,8 +4857,8 @@ class GoldenJourneyGame {
     openResourceMiningModal(tile) {
         const p = this.getActivePlayer();
         if (!this.isMyTurn()) return;
-        if (tile.stormRestricted && !this.sandboxInfiniteMove) {
-            this.showToast("⛔ Mỏ tài nguyên này đang bị phong tỏa bởi Giông Bão! Hãy đợi bão tan hoặc khai thác mỏ khác.");
+        if (this.isMineBlockedByStorm(tile)) {
+            this.showToast("⛈️ Mỏ này đang bị Giông Bão phong tỏa! Chờ trời quang hoặc tìm mỏ khác.");
             return;
         }
         if (!this.canSpendInteractiveAP(p)) {
@@ -3239,6 +4873,7 @@ class GoldenJourneyGame {
             this.showToast(`Khoang tàu đã đầy (Tối đa ${this.getMaxCargo(p)} ô hàng)! Hãy bán bớt hoặc sử dụng tài nguyên.`);
             return;
         }
+        this.recordGameplayAction();
 
         const quizPool = window.GAME_DATA.resourceQuizzes[tile.resourceType] || window.GAME_DATA.resourceQuizzes.food;
         const rawQuiz = quizPool[Math.floor(Math.random() * quizPool.length)];
@@ -3388,15 +5023,53 @@ class GoldenJourneyGame {
             "Thương Cảng Quốc Tế Cái Mép – Sài Gòn",
             "Thương Cảng Cần Thơ – Cửu Long"
         ];
-        // Trong 08:30 đầu (trừ Sandbox), 6 Thương Cảng chỉ bán Key 1! Sau 08:30 mở bán đầy đủ Key 1/2/3.
+        // KEY-2: Thuật toán phân bổ Key khan hiếm (có nơi bán, nơi trống) mỗi 08:30
         const earlyLocked = this.isEarlyGameMonumentLockActive();
-        const keyDistribution = earlyLocked ? [1, 1, 1, 1, 1, 1] : [1, 1, 2, 2, 3, 3];
-        if (!earlyLocked) {
-            for (let i = keyDistribution.length - 1; i > 0; i--) {
-                const j = Math.floor(Math.random() * (i + 1));
-                [keyDistribution[i], keyDistribution[j]] = [keyDistribution[j], keyDistribution[i]];
-            }
+        const portIndices = [0, 1, 2, 3, 4, 5];
+        for (let i = portIndices.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [portIndices[i], portIndices[j]] = [portIndices[j], portIndices[i]];
         }
+        const keyDistribution = [null, null, null, null, null, null];
+
+        if (earlyLocked) {
+            // Trước phút 08:30 (PvP — chỉ mở Di tích Cấp 1):
+            // Còn Di tích Cấp 1 -> đúng 3 cảng bán Key 1, 3 cảng trống (null). Hết Cấp 1 -> cả 6 cảng trống.
+            if (!this.isTierExhausted(1)) {
+                for (let k = 0; k < 3; k++) {
+                    keyDistribution[portIndices[k]] = 1;
+                }
+            }
+        } else {
+            // Từ phút 08:30 trở đi (và Sandbox): phân bổ theo danh sách cấp Di tích còn khả dụng
+            const activeTiers = this.getActiveMonumentTiers();
+            if (activeTiers.length === 3) {
+                // Còn 3 cấp (1, 2, 3): chọn 3 hoặc 4 cảng bán Key (mỗi cấp ít nhất 1 cảng); 2-3 cảng trống
+                const assigned = [...activeTiers];
+                if (Math.random() < 0.5) {
+                    assigned.push(activeTiers[Math.floor(Math.random() * activeTiers.length)]);
+                }
+                for (let k = 0; k < assigned.length; k++) {
+                    keyDistribution[portIndices[k]] = assigned[k];
+                }
+            } else if (activeTiers.length === 2) {
+                // Còn 2 cấp: chọn 3 cảng bán Key (mỗi cấp ít nhất 1 cảng); 3 cảng trống
+                const assigned = [
+                    activeTiers[0],
+                    activeTiers[1],
+                    activeTiers[Math.floor(Math.random() * 2)]
+                ];
+                for (let k = 0; k < assigned.length; k++) {
+                    keyDistribution[portIndices[k]] = assigned[k];
+                }
+            } else if (activeTiers.length === 1) {
+                // Còn 1 cấp: chọn 2 cảng bán Key cấp đó; 4 cảng trống
+                keyDistribution[portIndices[0]] = activeTiers[0];
+                keyDistribution[portIndices[1]] = activeTiers[0];
+            }
+            // Còn 0 cấp (hết 9/9 Di tích): cả 6 cảng để null
+        }
+
         const keyPrices = { 1: 2, 2: 4, 3: 6 };
 
         this.portInventories = {};
@@ -3409,8 +5082,8 @@ class GoldenJourneyGame {
                 regionId: regId,
                 portName: portNames[regId],
                 availableKeyTier: keyTier,
-                keyPrice: keyPrices[keyTier],
-                keyStock: 1,
+                keyPrice: keyTier !== null ? keyPrices[keyTier] : 0,
+                keyStock: keyTier !== null ? 1 : 0,
                 specialtyStock: 3,
                 randomBatches: [
                     { resType: "food", icon: "🌾", name: "Lô Lúa Tiếp Tế", qty: randFoodQty, cost: 1 },
@@ -3421,25 +5094,25 @@ class GoldenJourneyGame {
         }
 
         if (notify && this.isGameStarted) {
-            if (earlyLocked) {
-                this.logEvent("🔄 [Chu kỳ 08:30] Toàn bộ 6 Thương Cảng đang bán Key 1 (Key 2–3 mở bán lúc 08:30)!");
-                this.addTradeBulletinNotice("📡 Tin cảng: 6 Thương Cảng đang cung ứng Key 1 (Key 2–3 mở bán từ 08:30)");
-            } else {
-                const shortNames = ["Cái Lân", "Hải Phòng", "Tiên Sa", "Quy Nhơn", "Cái Mép", "Cần Thơ"];
-                const k2Ports = [];
-                const k3Ports = [];
-                for (let rId = 0; rId < 6; rId++) {
-                    const kt = this.portInventories[rId].availableKeyTier;
-                    if (kt === 2) k2Ports.push(`Cảng ${shortNames[rId]}`);
-                    if (kt === 3) k3Ports.push(`Cảng ${shortNames[rId]}`);
+            const shortNames = ["Cái Lân", "Hải Phòng", "Tiên Sa", "Quy Nhơn", "Cái Mép", "Cần Thơ"];
+            const stockedEntries = [];
+            for (let rId = 0; rId < 6; rId++) {
+                const kt = this.portInventories[rId].availableKeyTier;
+                if (kt !== null && kt !== undefined) {
+                    stockedEntries.push(`${shortNames[rId]} (Key ${kt})`);
                 }
-                const sampleIdx = [0, 1, 2, 3, 4, 5].find(rId => this.portInventories[rId].availableKeyTier === 2) || 2;
-                const sampleName = shortNames[sampleIdx];
-                const intelText = `📡 Tin cảng: Cảng ${sampleName} vừa nhập lô Key 2 • Key 2: ${k2Ports.join(", ")} • Key 3: ${k3Ports.join(", ")}`;
-                this.logEvent(`🔄 [Chu kỳ 08:30] ${intelText}`);
-                this.addTradeBulletinNotice(intelText);
             }
-            this.showToast("🔄 Kho hàng & Chìa Khóa tại 6 Thương Cảng vừa được làm mới (Cân bằng 2 Key 1 • 2 Key 2 • 2 Key 3)!");
+            let intelText = "";
+            if (stockedEntries.length > 0) {
+                intelText = `📡 Tin cảng: Đợt này ${stockedEntries.join(", ")} có nhập Chìa Khóa; các cảng còn lại tạm trống!`;
+            } else {
+                intelText = earlyLocked
+                    ? "📡 Tin cảng: Toàn bộ Di tích Cấp 1 đã được chinh phục — cả 6 Thương Cảng tạm trống Chìa Khóa!"
+                    : "📡 Tin cảng: Toàn bộ 9 Di tích đã được chinh phục — cả 6 Thương Cảng ngừng nhập Chìa Khóa!";
+            }
+            this.logEvent(`🔄 [Chu kỳ 08:30] ${intelText}`);
+            this.addTradeBulletinNotice(intelText);
+            this.showToast(intelText);
             this.updateUI();
         }
     }
@@ -3498,20 +5171,22 @@ class GoldenJourneyGame {
 
     getPortInventory(regionId) {
         const earlyLocked = this.isEarlyGameMonumentLockActive();
-        if (!this.portInventories || !this.portInventories[regionId]) {
-            const rId = regionId || 0;
-            const tier = earlyLocked ? 1 : ((rId % 3) + 1);
+        const rId = regionId || 0;
+        if (!this.portInventories || !this.portInventories[rId]) {
+            this.resetAllPortInventories(false);
+        }
+        const inv = this.portInventories[rId];
+        if (!inv) {
             return {
                 regionId: rId,
                 portName: (window.GAME_DATA.regions[rId] && window.GAME_DATA.regions[rId].portName) || `Thương Cảng ${rId + 1}`,
-                availableKeyTier: tier,
-                keyPrice: tier * 2,
-                keyStock: 1,
+                availableKeyTier: null,
+                keyPrice: 0,
+                keyStock: 0,
                 specialtyStock: 3
             };
         }
-        const inv = this.portInventories[regionId];
-        if (earlyLocked && inv.availableKeyTier > 1) {
+        if (earlyLocked && inv.availableKeyTier !== null && inv.availableKeyTier !== undefined && inv.availableKeyTier > 1) {
             return { ...inv, availableKeyTier: 1, keyPrice: 2 };
         }
         return inv;
@@ -3526,6 +5201,8 @@ class GoldenJourneyGame {
         }
 
         const region = tile.region;
+        this.recordGameplayAction();
+        this.clearZeroApAutoPassCountdown();
         const charterOwner = this.getPortCharterOwner(region.id);
         const mustPayTax = Boolean(charterOwner && charterOwner.id !== p.id);
 
@@ -3583,9 +5260,39 @@ class GoldenJourneyGame {
         }).join("");
 
         const earlyLock = this.isEarlyGameMonumentLockActive();
-        const kTier = earlyLock ? 1 : portInv.availableKeyTier;
-        const kCost = earlyLock ? 2 : portInv.keyPrice;
-        const hasMaxThisKey = (p.keys[kTier] || 0) >= 1;
+        const rawKeyTier = portInv ? portInv.availableKeyTier : null;
+        const kTier = (rawKeyTier === null || rawKeyTier === undefined) ? null : (earlyLock ? 1 : rawKeyTier);
+        const kCost = (kTier === null) ? 0 : (earlyLock ? 2 : portInv.keyPrice);
+        const allMonumentsExhausted = this.getActiveMonumentTiers().length === 0;
+        const isKeyExhausted = (kTier !== null) && this.isTierExhausted(kTier);
+        const hasMaxThisKey = (kTier !== null) && ((p.keys[kTier] || 0) >= 1);
+        const keyBtnDisabled = allMonumentsExhausted || (kTier === null) || isKeyExhausted || hasMaxThisKey;
+        const keyResetStr = this.formatMMSS(this.portResetRemainingSec || 0);
+
+        let keyTitleHtml = "";
+        let keySubHtml = "";
+        let keyBtnLabel = "";
+        if (allMonumentsExhausted) {
+            keyTitleHtml = `🏛️ Toàn bộ Di tích đã được chinh phục`;
+            keySubHtml = `<span style="color:#cbd5e1">Cả 6 Thương Cảng đã ngừng cung ứng Chìa Khóa</span>`;
+            keyBtnLabel = `🏛️ Đã chinh phục 9/9 Di tích`;
+        } else if (kTier === null) {
+            keyTitleHtml = `📭 Đợt này cảng không nhập Chìa Khóa`;
+            keySubHtml = `<span style="color:#cbd5e1">Làm mới sau <strong>${keyResetStr}</strong></span>`;
+            keyBtnLabel = `📭 Tạm trống Key`;
+        } else if (isKeyExhausted) {
+            keyTitleHtml = `🗝️ Key ${kTier}`;
+            keySubHtml = `<strong style="color:#fca5a5">🔒 Ngừng bán (Đã hết Di tích Cấp ${kTier})</strong>`;
+            keyBtnLabel = `🔒 Ngừng bán (Đã hết Di tích Cấp ${kTier})`;
+        } else if (hasMaxThisKey) {
+            keyTitleHtml = `🗝️ Key ${kTier} ${earlyLock ? '<small>(00:00–08:30)</small>' : ''}`;
+            keySubHtml = `<strong style="color:#6ee7b7">✅ Đã sở hữu 1/1</strong>`;
+            keyBtnLabel = `✅ Đã sở hữu 1/1`;
+        } else {
+            keyTitleHtml = `🗝️ Key ${kTier} ${earlyLock ? '<small>(00:00–08:30)</small>' : ''}`;
+            keySubHtml = `Giá bán: <strong>${kCost} 💰 Xu</strong> • Chưa sở hữu (0/1)`;
+            keyBtnLabel = `Mua Key ${kTier} (${kCost} 💰 Xu)`;
+        }
         const resStock = this.getPortResourceStock(region.id);
         const resResetStr = this.formatMMSS(this.portResResetRemainingSec || 0);
         const canFloorExport = (!charterOwner || charterOwner.id === p.id);
@@ -3726,10 +5433,10 @@ class GoldenJourneyGame {
                     </div>
                     <div class="port-key-ins-grid">
                         <div class="port-ki-card key-card">
-                            <div class="port-ki-title">🗝️ Key ${kTier} ${earlyLock ? '<small>(00:00–08:30)</small>' : ''}</div>
-                            <div class="port-ki-sub">${hasMaxThisKey ? '<strong style="color:#6ee7b7">Đã có 1/1</strong>' : `Giá bán: <strong>${kCost} 💰 Xu</strong> • Chưa sở hữu (0/1)`}</div>
-                            <button class="btn-trade-action gold" ${hasMaxThisKey ? 'disabled' : ''} onclick="window.GAME.buyKeyAtPort(${kTier}, ${kCost})">
-                                ${hasMaxThisKey ? '✅ Đã có 1/1' : `Mua Key ${kTier} (${kCost} 💰 Xu)`}
+                            <div class="port-ki-title">${keyTitleHtml}</div>
+                            <div class="port-ki-sub">${keySubHtml}</div>
+                            <button class="btn-trade-action gold" ${keyBtnDisabled ? 'disabled' : ''} onclick="window.GAME.buyKeyAtPort(${kTier === null ? 'null' : kTier}, ${kCost})">
+                                ${keyBtnLabel}
                             </button>
                         </div>
                         <div class="port-ki-card ins-card">
@@ -4729,6 +6436,14 @@ class GoldenJourneyGame {
     buyKeyAtPort(keyLevel, cost = null) {
         if (!this.isMyTurn()) return;
         const p = this.getActivePlayer();
+        if (keyLevel === null || keyLevel === undefined) {
+            this.showToast("⛔ Thương Cảng này hiện không mở bán Chìa khóa!");
+            return;
+        }
+        if (this.isTierExhausted(keyLevel)) {
+            this.showToast(`🏛️ Toàn bộ Di tích Cấp ${keyLevel} đã được chinh phục! Các Thương Cảng đã ngừng bán Key ${keyLevel}.`);
+            return;
+        }
         if (this.isEarlyGameMonumentLockActive() && keyLevel > 1) {
             this.showToast("🔒 Key 2 & Key 3 chỉ mở bán sau phút 08:30!");
             return;
@@ -5070,13 +6785,15 @@ class GoldenJourneyGame {
 
             <div class="monument-showcase-layout">
                 <div class="monument-photo-frame">
-                    <img src="${mon.image}" alt="${mon.name}" class="monument-real-img" />
+                    <img src="${mon.image}" alt="${mon.name}" class="monument-real-img atlas-zoomable-img"
+                         title="Bấm để phóng to hình ảnh &amp; xem nguồn gốc"
+                         onclick="window.GAME && window.GAME.openAtlasLightboxByMonument('${mon.id}')" />
                     <div class="photo-caption">
                         <div>📸 <strong>Ảnh thực tế:</strong> ${mon.name} (${mon.province})</div>
                         <div class="copyright-cite-box">
-                            <div>✍️ <strong>Tác giả ảnh:</strong> ${mon.photoAuthor || "Wikimedia Commons"} • <strong>Giấy phép:</strong> ${mon.photoLicense || "CC BY-SA"}</div>
-                            <div>🔗 <strong>Nguồn ảnh gốc:</strong> <a href="${mon.photoSourceUrl || '#'}" target="_blank" rel="noopener noreferrer" class="cite-link">Wikimedia Commons File ↗</a></div>
-                            <div>📰 <strong>Nguồn bài báo &amp; Tư liệu:</strong> ${mon.articleSourceCite || mon.sourceCite}</div>
+                            ${(mon.photoAuthor || mon.photoLicense) ? `<div>✍️ ${[mon.photoAuthor, mon.photoLicense].filter(Boolean).join(" • ")}</div>` : ""}
+                            ${(mon.photoSourceUrl && /^https?:\/\//i.test(mon.photoSourceUrl)) ? `<div>🔗 <strong>Trang nguồn gốc:</strong> <a href="${mon.photoSourceUrl}" target="_blank" rel="noopener noreferrer" class="cite-link">${mon.photoSourceUrl} ↗</a></div>` : ""}
+                            ${(mon.articleSourceCite || mon.sourceCite) ? `<div>📰 ${mon.articleSourceCite || mon.sourceCite}</div>` : ""}
                         </div>
                     </div>
                 </div>
@@ -5251,6 +6968,10 @@ class GoldenJourneyGame {
             if (tier === 3) {
                 tile.monumentLocked = true;
             }
+            tile.monumentConqueror = { name: p.name, color: p.color };
+            // KEY-1: Quét & khóa tức thì Key cấp tương ứng nếu toàn bộ Di tích cấp này vừa bị chinh phục hết!
+            this.checkAndNotifyExhaustedMonumentTier(tier);
+            this.syncMonumentVisuals3D();
 
             window.SFX.playRelicFanfare();
             this.world.triggerBurstAnimation(tile.q, tile.r, 0xd4af37, 36);
@@ -5402,9 +7123,61 @@ class GoldenJourneyGame {
     tickMatchClockAndWeather() {
         if (!this.isGameStarted || this.matchWinner) return;
 
-        this.matchElapsedSec = (this.matchElapsedSec || 0) + 1;
-        this.portResetRemainingSec = Math.max(0, (this.portResetRemainingSec || this.portResetIntervalSec) - 1);
-        this.portResResetRemainingSec = Math.max(0, (this.portResResetRemainingSec || this.portResResetIntervalSec) - 1);
+        // Mục 4D (Chỉ chạy ở chế độ PvP — tự tắt ở Sandbox):
+        // 1) Đóng băng đồng hồ trận 45:00 nếu đứng yên quá 45s chưa có hành động gameplay thực tế
+        // 2) Phát hiện AFK 50s (45s không tương tác + 5s cảnh báo trực diện -> Tàu Máy tạm tiếp quản)
+        const now = Date.now();
+        const activeP = this.getActivePlayer();
+        const isPvPActiveHumanTurn = Boolean(
+            !this.sandboxMode &&
+            !this.isPreGameCountingDown &&
+            this.roomState.status !== "turn_order_quiz" &&
+            activeP &&
+            !activeP.isAI &&
+            !activeP.eliminated
+        );
+
+        if (isPvPActiveHumanTurn) {
+            if (this.hasActiveUnansweredQuiz()) {
+                // Tạm dừng bộ đếm AFK & không đóng băng khi đang đọc/trả lời Quiz 60s/90s
+                this.lastInteractionAt = now;
+                this.lastGameplayActionAt = now;
+                this.isMatchClockFrozen = false;
+                this.hideAfkWarningBanner();
+            } else {
+                // Bộ đếm 2: Đóng băng đồng hồ 45:00 sau 45s chưa có hành động thực tế (dù vẫn bấm UI)
+                const gameplayIdleSec = (now - (this.lastGameplayActionAt || now)) / 1000;
+                this.isMatchClockFrozen = gameplayIdleSec >= 45;
+
+                // Bộ đếm 1: AFK tổng 50s (chỉ cảnh báo & tự tiếp quản trên máy của chính người chơi đang tới lượt)
+                if (this.isMyTurn()) {
+                    const uiIdleSec = (now - (this.lastInteractionAt || now)) / 1000;
+                    if (uiIdleSec >= 50) {
+                        this.triggerAfkBotTakeover(activeP);
+                    } else if (uiIdleSec >= 45) {
+                        const secLeft = Math.max(1, Math.ceil(50 - uiIdleSec));
+                        this.afkWarningRemainingSec = secLeft;
+                        const banner = document.getElementById("afk-warning-banner");
+                        const txt = document.getElementById("afk-warning-text");
+                        if (txt) {
+                            txt.textContent = `⚠️ BẠN ĐANG ĐỨNG YÊN! Tàu Máy sẽ tạm tiếp quản sau ${secLeft}s — Bấm nút hoặc thao tác bất kỳ để tiếp tục`;
+                        }
+                        if (banner) banner.classList.remove("hidden");
+                    } else if (this.afkWarningRemainingSec !== null) {
+                        this.hideAfkWarningBanner();
+                    }
+                }
+            }
+        } else {
+            this.isMatchClockFrozen = false;
+            if (this.afkWarningRemainingSec !== null) this.hideAfkWarningBanner();
+        }
+
+        if (!this.isMatchClockFrozen) {
+            this.matchElapsedSec = (this.matchElapsedSec || 0) + 1;
+            this.portResetRemainingSec = Math.max(0, (this.portResetRemainingSec || this.portResetIntervalSec) - 1);
+            this.portResResetRemainingSec = Math.max(0, (this.portResResetRemainingSec || this.portResResetIntervalSec) - 1);
+        }
 
         // Đúng chu kỳ 05:00 (300s): Tự động nhập lô tài nguyên giới hạn mới tại 6 Thương Cảng (độc lập với 08:30 Key)!
         if (this.portResResetRemainingSec <= 0) {
@@ -5415,18 +7188,20 @@ class GoldenJourneyGame {
             }
         }
 
-        // Đúng phút 08:30 (510s): Mở khóa toàn bộ 7 Di tích Cấp 2–3 & mở bán Key 2–3 tại 6 Cảng!
+        // Đúng phút 08:30 (510s): Mở khóa toàn bộ 7 Di tích Cấp 2–3 & làm mới Key khan hiếm tại 6 Cảng!
         if (!this.earlyLockReleased && this.matchElapsedSec >= 510) {
             this.earlyLockReleased = true;
-            if (!this.roomState.code || this.roomState.isHost) {
-                this.resetAllPortInventories(false);
-                this.syncMultiplayerGameState();
-            }
-            const unlockMsg = "🔓 [08:30] Toàn bộ 7 Di tích Cấp 2–3 đã hoàn tất khai quật & 6 Thương Cảng chính thức mở bán Key 2 – Key 3!";
+            this.syncMonumentVisuals3D();
+            const unlockMsg = "🔓 [08:30] Toàn bộ 7 Di tích Cấp 2–3 đã hoàn tất khai quật & 6 Thương Cảng mở đợt phân bổ Key 1–2–3!";
             this.logEvent(unlockMsg);
             this.addTradeBulletinNotice(unlockMsg);
-            this.showToast(unlockMsg);
-            this.updateUI();
+            if (!this.roomState.code || this.roomState.isHost) {
+                this.resetAllPortInventories(true);
+                this.syncMultiplayerGameState();
+            } else {
+                this.showToast(unlockMsg);
+                this.updateUI();
+            }
         }
 
         if (this.portResetRemainingSec <= 0) {
@@ -5442,8 +7217,29 @@ class GoldenJourneyGame {
             this.applyWeatherPhase(expectedPhase, true);
         }
 
-        // Hết giờ 45:00 (2700s): Tự động lật toàn bộ Điểm Bí Mật, người tổng điểm (Công khai + Ẩn) cao nhất thắng!
-        if (this.matchElapsedSec >= 2700 && !this.sandboxMode) {
+        // Mục 4C: Cảnh báo đúng mốc còn 05:00 cuối trận (2400s / 2700s)
+        const remainingSec = Math.max(0, 2700 - this.matchElapsedSec);
+        if (remainingSec <= 300 && remainingSec > 0 && !this.finalFiveMinNotified) {
+            this.finalFiveMinNotified = true;
+            const sprintMsg = "⏳ 5 PHÚT CUỐI TRẬN! Dồn lực cán mốc 15 ⭐ Thịnh Vượng hoặc tối ưu tổng điểm!";
+            this.logEvent(sprintMsg);
+            this.addTradeBulletinNotice(sprintMsg);
+            this.showToast(sprintMsg);
+        }
+
+        // Hết giờ 45:00 (2700s): Dừng mọi lượt đi, đóng Quiz/Cảng/Chợ, lật toàn bộ Điểm Bí Mật & phá hòa 4 tầng!
+        if (this.matchElapsedSec >= 2700 && (!this.sandboxMode || this.sandboxAllowTimeout) && !this.victoryShownForMatch) {
+            this.sandboxAllowTimeout = false;
+            this.isBusy = true;
+            clearTimeout(this.autoEndTurnTimer);
+            this.cancelLockedMovePath(false);
+            if (typeof this.clearActivePendingQuiz === "function") {
+                this.clearActivePendingQuiz();
+            } else {
+                this.activePendingQuiz = null;
+            }
+            this.closeModal();
+
             const ranked = [...this.players].sort((a, b) => this.comparePlayersForRanking(a, b, true));
             const topWinner = ranked[0];
             if (topWinner) {
@@ -5451,12 +7247,119 @@ class GoldenJourneyGame {
                 this.logEvent(`⏱️ HẾT GIỜ 45:00! Lật toàn bộ Điểm Bí Mật — ${topWinner.name} dẫn đầu với ${this.getTotalProsperity(topWinner)} ⭐ Điểm Thịnh Vượng và giành chiến thắng!`);
                 this.updateUI();
                 this.syncMultiplayerGameState();
-                this.showVictoryScreen(topWinner);
+                this.showVictoryScreen(topWinner, null, null, "timeout");
                 return;
             }
         }
 
         this.updateClockAndTickerUI();
+    }
+
+    // ------------------------------------------------------------------------
+    // MỤC 4B: FAIR 4-MINE STORM BLOCKADE (NEVER LOCKS 100% OF ANY TYPE, SPREAD ACROSS MAP)
+    // ------------------------------------------------------------------------
+    isMineBlockedByStorm(tile) {
+        if (!tile || !tile.resourceType) return false;
+        if (tile.stormRestricted) return true;
+        return Array.isArray(this.blockedMineIds) && this.blockedMineIds.includes(`${tile.q},${tile.r}`);
+    }
+
+    triggerStormMineBlockade(notify = true) {
+        if (!this.world || !Array.isArray(this.world.hexTiles)) return [];
+        const allMines = this.world.hexTiles.filter(t => Boolean(t.resourceType));
+        allMines.forEach(t => { t.stormRestricted = false; });
+
+        const totalByType = { food: 0, wood: 0, iron: 0 };
+        allMines.forEach(t => {
+            if (totalByType[t.resourceType] !== undefined) totalByType[t.resourceType]++;
+        });
+
+        // Shuffle all resource mines
+        const pool = [...allMines];
+        for (let i = pool.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [pool[i], pool[j]] = [pool[j], pool[i]];
+        }
+
+        const getMacroZone = (regId) => (regId <= 1 ? "north" : (regId <= 3 ? "central" : "south"));
+        const picked = [];
+        const pickedByType = { food: 0, wood: 0, iron: 0 };
+        const pickedByZone = { north: 0, central: 0, south: 0 };
+
+        const canPick = (mine, maxPerType, maxPerZone) => {
+            const tp = mine.resourceType;
+            const total = totalByType[tp] || 0;
+            // Tuyệt đối KHÔNG phong tỏa sạch 100% bất kỳ loại tài nguyên nào (luôn giữ >= 1 mỏ mở cho mỗi loại)
+            if ((total - (pickedByType[tp] + 1)) < 1) return false;
+            if (pickedByType[tp] >= maxPerType) return false;
+            const z = getMacroZone(mine.regionId || 0);
+            if (pickedByZone[z] >= maxPerZone) return false;
+            return true;
+        };
+
+        // Pass 1 (Chuẩn 2-2-2 & rải đều 3 miền Bắc / Trung / Nam: tối đa 2 mỏ/loại & 2 mỏ/miền)
+        for (const mine of pool) {
+            if (picked.length >= 6) break;
+            if (!canPick(mine, 2, 2)) continue;
+            picked.push(mine);
+            pickedByType[mine.resourceType]++;
+            pickedByZone[getMacroZone(mine.regionId || 0)]++;
+        }
+        // Pass 2: giữ 2 mỏ/loại, nới giới hạn miền lên 3 nếu 1 miền có nhiều mỏ
+        if (picked.length < 6) {
+            for (const mine of pool) {
+                if (picked.length >= 6) break;
+                if (picked.includes(mine)) continue;
+                if (!canPick(mine, 2, 3)) continue;
+                picked.push(mine);
+                pickedByType[mine.resourceType]++;
+                pickedByZone[getMacroZone(mine.regionId || 0)]++;
+            }
+        }
+        // Pass 3 (bù sang loại còn dư nhiều mỏ nếu 1 loại có quá ít mỏ, vẫn giữ >= 1 mỏ mở cho mọi loại!)
+        if (picked.length < 6) {
+            for (const mine of pool) {
+                if (picked.length >= 6) break;
+                if (picked.includes(mine)) continue;
+                if (!canPick(mine, 6, 6)) continue;
+                picked.push(mine);
+                pickedByType[mine.resourceType]++;
+                pickedByZone[getMacroZone(mine.regionId || 0)]++;
+            }
+        }
+
+        picked.forEach(t => { t.stormRestricted = true; });
+        this.blockedMineIds = picked.map(t => `${t.q},${t.r}`);
+        this.world.updateResourceVisuals();
+
+        if (notify && picked.length > 0 && this.isGameStarted) {
+            const msg = "⛈️ GIÔNG BÃO ĐỔ BỘ! 6 mỏ tài nguyên đang bị phong tỏa tạm thời — Hãy chuyển hướng khai thác hoặc giao dịch trên Chợ P2P!";
+            this.logEvent(msg);
+            this.addTradeBulletinNotice(msg);
+            this.showToast(msg);
+        }
+        if (!this.roomState.code || this.roomState.isHost) {
+            this.syncMultiplayerGameState();
+        }
+        return this.blockedMineIds;
+    }
+
+    clearStormMineBlockade(notify = true) {
+        const hadBlocked = Array.isArray(this.blockedMineIds) && this.blockedMineIds.length > 0;
+        this.blockedMineIds = [];
+        if (this.world && Array.isArray(this.world.hexTiles)) {
+            this.world.hexTiles.forEach(t => { t.stormRestricted = false; });
+            this.world.updateResourceVisuals();
+        }
+        if (notify && hadBlocked && this.isGameStarted) {
+            const msg = "☀️ Giông bão đã tan — Toàn bộ mỏ tài nguyên hoạt động trở lại bình thường!";
+            this.logEvent(msg);
+            this.addTradeBulletinNotice(msg);
+            this.showToast(msg);
+        }
+        if (hadBlocked && (!this.roomState.code || this.roomState.isHost)) {
+            this.syncMultiplayerGameState();
+        }
     }
 
     applyWeatherPhase(phaseKey, notify = true) {
@@ -5483,21 +7386,13 @@ class GoldenJourneyGame {
             }
         }
 
-        // Clear all storm restrictions first
-        this.world.hexTiles.forEach(t => {
-            t.stormRestricted = false;
-        });
-
-        // During Thunderstorm (Giông Bão), restrict 4 resource extraction nodes
-        if (phaseKey === "thunderstorm") {
-            const resTiles = this.world.hexTiles.filter(t =>
-                t.resourceType &&
-                !this.players.some(pl => !pl.eliminated && pl.q === t.q && pl.r === t.r)
-            );
-            for (let i = 0; i < Math.min(4, resTiles.length); i++) {
-                const pickIdx = (i * 3) % resTiles.length;
-                resTiles[pickIdx].stormRestricted = true;
+        // Mục 4B: Giông Bão / Siêu Bão Yagi -> phong tỏa công bằng 4 mỏ tài nguyên; hết bão -> mở lại toàn bộ!
+        if (phaseKey === "thunderstorm" || phaseKey === "super_typhoon_yagi") {
+            if (!this.roomState.code || this.roomState.isHost) {
+                this.triggerStormMineBlockade(notify);
             }
+        } else {
+            this.clearStormMineBlockade(notify);
         }
 
         this.world.updateResourceVisuals();
@@ -5534,7 +7429,14 @@ class GoldenJourneyGame {
         const clockStr = this.formatMMSS(this.matchElapsedSec || 0);
         const portResetStr = this.formatMMSS(this.portResetRemainingSec || 0);
 
-        if (clockTimeEl) clockTimeEl.textContent = `⏱️ ${clockStr}`;
+        if (clockTimeEl) {
+            clockTimeEl.textContent = this.isMatchClockFrozen ? `⏱️ ${clockStr} ⏸️` : `⏱️ ${clockStr}`;
+            clockTimeEl.title = this.isMatchClockFrozen
+                ? "Đồng hồ trận tạm dừng do tàu chưa hành động quá 45 giây"
+                : "Thời gian thực trong ván (45:00)";
+            const isFinal5Min = (!this.isMatchClockFrozen && this.matchElapsedSec >= 2400 && this.matchElapsedSec < 2700);
+            clockTimeEl.classList.toggle("final-sprint-pulse", isFinal5Min);
+        }
         if (weatherPhaseEl) weatherPhaseEl.textContent = meta.label;
         if (portResetMiniEl) portResetMiniEl.textContent = `⚓ Reset: ${portResetStr}`;
 
@@ -5764,11 +7666,15 @@ class GoldenJourneyGame {
     // ------------------------------------------------------------------------
     endPlayerTurn(isAuto = false) {
         clearTimeout(this.autoEndTurnTimer);
+        this.clearZeroApAutoPassCountdown();
+        this.hideAfkWarningBanner();
+        this.hideAfkAutoNotice();
         if (this.isBusy) return;
         if (!isAuto && this.hasActiveUnansweredQuiz()) {
             this.showToast("⏳ Bạn đang có câu hỏi Quiz chưa trả lời! Hãy bấm '❓ Mở Lại Quiz' để hoàn thành trước khi kết thúc lượt.");
             return;
         }
+        this.cancelLockedMovePath(false);
         const p = this.getActivePlayer();
         if (!p) return;
 
@@ -5901,10 +7807,25 @@ class GoldenJourneyGame {
                 if (needsTax && (ai.coins || 0) < 1) {
                     // Mục 3B-1: Bot có 0 Xu tuyệt đối không tìm đường vào cảng người khác!
                     score -= 80;
-                } else if (ai.specialties.some(s => Math.abs(s.regionId - t.regionId) >= 1)) {
-                    score += 65;
-                } else if (ai.coins >= (needsTax ? 3 : 2) && this.getCargoCount(ai) < this.getMaxCargo(ai) - 1) {
-                    score += 32;
+                } else {
+                    const pInv = this.getPortInventory(t.regionId);
+                    const pKeyTier = pInv ? pInv.availableKeyTier : null;
+                    const canBuyNeededKey = (
+                        pKeyTier !== null &&
+                        pKeyTier !== undefined &&
+                        !this.isTierExhausted(pKeyTier) &&
+                        pInv.keyStock > 0 &&
+                        (ai.keys[pKeyTier] || 0) === 0 &&
+                        ai.coins >= (pInv.keyPrice + (needsTax ? 1 : 0))
+                    );
+                    if (ai.specialties.some(s => Math.abs(s.regionId - t.regionId) >= 1)) {
+                        score += 65;
+                    } else if (canBuyNeededKey) {
+                        // KEY-3: Bot chỉ ưu tiên tìm đường đến cảng có key !== null và cấp Key đó chưa bị chinh phục hết
+                        score += 50;
+                    } else if (ai.coins >= (needsTax ? 3 : 2) && this.getCargoCount(ai) < this.getMaxCargo(ai) - 1) {
+                        score += 32;
+                    }
                 }
             }
 
@@ -5923,12 +7844,21 @@ class GoldenJourneyGame {
         });
 
         const afterMove = () => {
+            // Nếu người chơi vừa chạm/bấm lấy lại quyền lái giữa chừng -> dừng hẳn luồng Bot & trả quyền sạch sẽ!
+            if (!ai.isAI || ai.eliminated || this.matchWinner) {
+                this.refreshReachableHexes();
+                this.updateUI();
+                this.syncMultiplayerGameState();
+                return;
+            }
             const destTile = this.getCurrentTile(ai);
             if (ai.ap >= 1 && destTile && !ai.eliminated) {
                 this.performAIInteractiveAction(ai, destTile);
             }
             this.syncMultiplayerGameState();
-            setTimeout(() => {
+            clearTimeout(this.aiPostMoveTimer);
+            this.aiPostMoveTimer = setTimeout(() => {
+                if (!ai.isAI || ai.eliminated || this.matchWinner) return;
                 if (this.getPlayerProsperity(ai) < 15) {
                     this.endPlayerTurn(true);
                 }
@@ -5974,6 +7904,9 @@ class GoldenJourneyGame {
                 }
                 ai.relics.push({ id: mon.id, name: mon.relicName, icon: mon.relicIcon, monumentName: mon.name, tier });
                 if (tier === 3) tile.monumentLocked = true;
+                tile.monumentConqueror = { name: ai.name, color: ai.color };
+                this.checkAndNotifyExhaustedMonumentTier(tier);
+                this.syncMonumentVisuals3D();
 
                 window.SFX.playRelicFanfare();
                 this.world.triggerBurstAnimation(tile.q, tile.r, 0xd4af37, 30);
@@ -6024,8 +7957,8 @@ class GoldenJourneyGame {
             }
 
             const portInv = this.getPortInventory(tile.regionId);
-            const kTier = portInv.availableKeyTier;
-            if (portInv.keyStock > 0 && (ai.keys[kTier] || 0) === 0 && ai.coins >= portInv.keyPrice) {
+            const kTier = portInv ? portInv.availableKeyTier : null;
+            if (kTier !== null && kTier !== undefined && !this.isTierExhausted(kTier) && portInv.keyStock > 0 && (ai.keys[kTier] || 0) === 0 && ai.coins >= portInv.keyPrice) {
                 ai.coins -= portInv.keyPrice;
                 ai.keys[kTier] = 1;
                 portInv.keyStock = 0;
@@ -6087,12 +8020,15 @@ class GoldenJourneyGame {
     // ------------------------------------------------------------------------
     // VICTORY SCREEN V3 (15 ĐIỂM THỊNH VƯỢNG + HUY HIỆU + PHẢN TƯ + 25s RETURN)
     // ------------------------------------------------------------------------
-    showVictoryScreen(winner, lastQuiz = null, lastChosenIdx = null) {
+    showVictoryScreen(winner, lastQuiz = null, lastChosenIdx = null, winMode = "points") {
         if (!winner) return;
         this.victoryShownForMatch = true;
         this.matchWinner = winner;
         clearTimeout(this.autoEndTurnTimer);
         clearInterval(this.victoryCountdownInterval);
+        this.hideAfkWarningBanner();
+        this.hideAfkAutoNotice();
+        this.cancelLockedMovePath(false);
 
         window.SFX.playRelicFanfare();
 
@@ -6104,24 +8040,40 @@ class GoldenJourneyGame {
             return this.comparePlayersForRanking(a, b, true);
         });
 
+        const tieReasonText = sortedStandings.length >= 2 ? this.getTieBreakerReason(sortedStandings[0], sortedStandings[1]) : "";
+        const tieBannerHtml = tieReasonText
+            ? `<div style="margin:6px 0 10px; padding:7px 11px; border-radius:8px; background:rgba(217,119,6,0.22); border:1px solid #fde047; color:#fef08a; font-size:12px; font-weight:800; text-align:center">${tieReasonText}</div>`
+            : "";
+
         const standingsHtml = sortedStandings.map((pl, idx) => {
             const totalPts = getProsperityPoints(pl);
             const pubPts = this.getPlayerProsperity(pl);
             const secPts = this.getPlayerSecretPoints(pl);
             const monCount = (pl.relics || []).length;
-            const p2pCount = pl.p2pTrades || 0;
+            const quizOk = pl.quizCorrect || 0;
+            const wealth = (pl.coins || 0) + this.getCargoCount(pl);
+            const completedSecrets = (pl.secretQuests || []).filter(sq => sq.claimed);
+            const secretCardsText = completedSecrets.length > 0
+                ? completedSecrets.map(sq => `${sq.title} (+${sq.rewardPoints || 2}⭐)`).join(" • ")
+                : "Chưa hoàn thành thẻ bí mật";
             return `
-            <div class="turn-order-leaderboard-row ${pl.id === winner.id ? 'rank-1' : ''}">
-                <div style="display:flex; align-items:center; gap:9px; min-width:0">
-                    <span class="slot-badge-num" style="background:${pl.color}; color:#fff; width:24px; height:24px; font-size:11.5px">#${idx + 1}</span>
-                    <div style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">
-                        <strong style="color:#f8fafc; font-size:13px">${pl.name}</strong>
-                        <span style="color:#cbd5e1; font-size:11px">(${pl.vesselTitle})</span>
-                        ${pl.id === winner.id ? '<span style="color:#fde68a; font-weight:800; margin-left:5px; font-size:11.5px">🏆 VÔ ĐỊCH</span>' : ''}
+            <div class="turn-order-leaderboard-row ${pl.id === winner.id ? 'rank-1' : ''}" style="flex-direction:column; align-items:stretch; gap:4px; padding:7px 10px">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%">
+                    <div style="display:flex; align-items:center; gap:8px; min-width:0">
+                        <span class="slot-badge-num" style="background:${pl.color}; color:#fff; width:24px; height:24px; font-size:11.5px; flex-shrink:0">#${idx + 1}</span>
+                        <div style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">
+                            <strong style="color:#f8fafc; font-size:13px">${pl.name}</strong>
+                            <span style="color:#cbd5e1; font-size:11px">(${pl.vesselTitle})</span>
+                            ${pl.id === winner.id ? '<span style="color:#fde68a; font-weight:800; margin-left:5px; font-size:11.5px">🏆 VÔ ĐỊCH</span>' : ''}
+                        </div>
+                    </div>
+                    <div style="font-size:11.5px; font-weight:800; color:#fde68a; white-space:nowrap">
+                        [Công khai: ${pubPts}] + [<span style="color:#e9d5ff">🎭 Bí mật: +${secPts}</span>] = <strong style="color:#fef08a">⭐ ${totalPts}/15</strong>
                     </div>
                 </div>
-                <div style="font-size:11px; font-weight:800; color:#fde68a; white-space:nowrap">
-                    Công khai ${pubPts} + <span style="color:#d8b4fe">Bí mật ${secPts}</span> = <strong style="color:#fef08a">⭐ ${totalPts}/15</strong> • 🏛️ ${monCount} • 🤝 ${p2pCount} • 💰 ${pl.coins}
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:10.5px; color:#cbd5e1; border-top:1px solid rgba(255,255,255,0.08); padding-top:3px">
+                    <span style="color:#d8b4fe; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">🎭 Thẻ Bí Mật đã lật: <strong>${secretCardsText}</strong></span>
+                    <span style="white-space:nowrap; flex-shrink:0">🏛️ ${monCount} Di tích • 📚 ${quizOk} Quiz đúng • 💰+📦 ${wealth}</span>
                 </div>
             </div>
             `;
@@ -6177,8 +8129,11 @@ class GoldenJourneyGame {
             </div>
 
             <p class="victory-sub-desc">
-                Thuyền trưởng <strong>${winner.name}</strong> đã xuất sắc vượt qua sóng gió Biển Đông, giao thương liên vùng dọc <strong>6 Vùng Kinh Tế Việt Nam</strong> và chạm mốc <strong>15 ĐIỂM THỊNH VƯỢNG</strong>!
+                ${winMode === "timeout"
+                    ? `Hết giờ <strong>45:00</strong>! Sau khi lật toàn bộ <strong>Thẻ Nhiệm Vụ Bí Mật</strong>, Thuyền trưởng <strong>${winner.name}</strong> dẫn đầu bảng xếp hạng với <strong>${getProsperityPoints(winner)} ⭐ ĐIỂM THỊNH VƯỢNG</strong>!`
+                    : `Thuyền trưởng <strong>${winner.name}</strong> đã xuất sắc vượt qua sóng gió Biển Đông, giao thương liên vùng dọc <strong>6 Vùng Kinh Tế Việt Nam</strong> và chạm mốc <strong>15 ĐIỂM THỊNH VƯỢNG</strong>!`}
             </p>
+            ${tieBannerHtml}
 
             <div class="victory-section-label">🏅 Huy Hiệu Vinh Danh Cuối Trận</div>
             <div class="victory-badges-grid">
@@ -6231,9 +8186,14 @@ class GoldenJourneyGame {
                 <span id="victory-countdown-sec" class="victory-countdown-sec">25s</span>
             </div>
 
-            <div class="modal-actions" style="justify-content:center; margin-top:10px">
-                <button class="btn-primary-gold" onclick="window.GAME.returnToRoomLobbyAfterVictory()">
-                    🚪 Về Sảnh Ngay
+            <div class="modal-actions" style="justify-content:center; gap:10px; margin-top:10px; flex-wrap:wrap">
+                ${this.roomState && this.roomState.code ? `
+                    <button class="btn-primary-gold" onclick="window.GAME.returnToRoomLobbyAfterVictory()">
+                        🚪 Về Phòng Chờ
+                    </button>
+                ` : ''}
+                <button class="${this.roomState && this.roomState.code ? 'btn-secondary' : 'btn-primary-gold'}" onclick="window.GAME.returnToMainMenu()">
+                    🏠 Về Màn Hình Chính
                 </button>
             </div>
         `;
@@ -6302,6 +8262,7 @@ class GoldenJourneyGame {
 
         this.world.setCameraLockTarget(localP);
         this.updateClockAndTickerUI();
+        this.syncAfkAutoNoticeUI();
 
         document.getElementById("hud-round").textContent = `🌀 V${this.roundNumber}`;
 
@@ -6346,17 +8307,25 @@ class GoldenJourneyGame {
 
         // #panel-captain ALWAYS displays the LOCAL player's own ship info (`localP`)
         document.getElementById("active-player-dot").style.backgroundColor = localP.color;
-        document.getElementById("active-player-name").textContent = `${localP.name} ${myTurn ? '🎯' : '⛵'}`;
+        document.getElementById("active-player-name").textContent = `${localP.name} ${localP.afkBotTakeover ? '🤖 AFK' : (myTurn ? '🎯' : '⛵')}`;
         document.getElementById("active-player-vessel").textContent = localP.vesselTitle;
         const charterEl = document.getElementById("active-player-charter");
         if (charterEl) {
             if (localP.charterRegionId !== undefined && localP.charterRegionId !== null) {
-                charterEl.textContent = `📜 ${this.getRegionShortName(localP.charterRegionId)}`;
+                charterEl.textContent = `👑 ${this.getRegionShortName(localP.charterRegionId)}`;
+                charterEl.title = "Bấm để xem Cảng Thương quyền của bạn";
+                charterEl.style.cursor = "pointer";
+                charterEl.onclick = (e) => {
+                    if (e && e.stopPropagation) e.stopPropagation();
+                    this.focusCameraOnOwnCharterPort();
+                };
                 charterEl.classList.remove("hidden");
             } else {
                 charterEl.classList.add("hidden");
             }
         }
+        this.syncPortOwnershipVisuals3D();
+        this.checkSprint12Alerts();
 
         const moveApRemaining = myTurn
             ? Math.max(0, Math.min(3 - (localP.moveApSpent || 0), localP.ap))
@@ -6464,29 +8433,46 @@ class GoldenJourneyGame {
             });
 
             const rankMedals = ["🥇", "🥈", "🥉", "#4", "#5"];
+            const compactRegionMap = {
+                0: "TD&MN Bắc Bộ",
+                1: "ĐB Sông Hồng",
+                2: "DH Miền Trung",
+                3: "Tây Nguyên",
+                4: "Đông Nam Bộ",
+                5: "ĐB Sông Cửu Long"
+            };
             rosterEl.innerHTML = rankedPlayers.map((entry, rankIdx) => {
                 const { pl, turnIdx } = entry;
                 const isMe = localP && (World3D.getPlayerShipKey(pl) === World3D.getPlayerShipKey(localP));
                 const isTurn = (turnIdx === this.activePlayerIdx);
                 const medal = rankMedals[rankIdx] || `#${rankIdx + 1}`;
+                const hasCharter = pl.charterRegionId !== undefined && pl.charterRegionId !== null;
+                const charterShort = hasCharter
+                    ? `📜 ${compactRegionMap[pl.charterRegionId] || this.getRegionShortName(pl.charterRegionId)}`
+                    : `🌐 Tự Do`;
+                const leftStatsHtml = pl.eliminated
+                    ? `☠️ Đắm tàu`
+                    : `❤️ ${pl.hp}/${pl.maxHp} • 💰 ${pl.coins}/30${pl.hasSerpentCoin ? ' • 🛡️' : ''}`;
                 return `
                     <div class="lb-row-card ${isTurn ? 'active-turn' : ''} ${isMe ? 'is-me' : ''} ${pl.eliminated ? 'eliminated' : ''}"
-                         title="Bấm để xem vị trí thuyền của ${pl.name}"
+                         title="Bấm để xem vị trí ${pl.vesselTitle || 'tàu'} của ${pl.name}"
                          onclick="window.GAME.focusOnPlayerShip(${pl.id})">
-                        <div class="lb-left">
-                            <span class="lb-rank-badge">${medal}</span>
-                            <span class="lb-color-dot" style="background:${pl.color}"></span>
-                            <div class="lb-info">
-                                <div class="lb-name-line">
-                                    ${pl.name} ${isMe ? '<span style="color:#fde047">[Bạn]</span>' : ''} ${isTurn ? '🎯' : ''}
-                                </div>
-                                <div class="lb-sub-line">
-                                    ${pl.eliminated ? '☠️ Đắm tàu' : `❤️ ${pl.hp}/${pl.maxHp} • 💰 ${pl.coins}/30${pl.charterRegionId !== undefined && pl.charterRegionId !== null ? ` • 📜 ${this.getRegionShortName(pl.charterRegionId)}` : ''}${pl.hasSerpentCoin ? ' • 🛡️' : ''}`}
-                                </div>
+                        <div class="lb-row-top">
+                            <div class="lb-row-top-left">
+                                <span class="lb-rank-badge">${medal}</span>
+                                <span class="lb-color-dot" style="background:${pl.color}"></span>
+                                <span class="lb-name-text">${pl.name}${pl.afkBotTakeover ? ' 🤖' : ''}</span>
+                                ${isMe ? '<span class="lb-me-tag">[Bạn]</span>' : ''}
+                                ${isTurn ? '<span class="lb-turn-indicator" title="Đang tới lượt">🎯</span>' : ''}
+                            </div>
+                            <div class="lb-relic-pill" title="Điểm Thịnh Vượng Công Khai (15 = Thắng)">
+                                ⭐ ${this.getPlayerProsperity(pl)}/15
                             </div>
                         </div>
-                        <div class="lb-relic-pill" title="Điểm Thịnh Vượng (15 = Thắng)">
-                            ⭐${this.getPlayerProsperity(pl)}/15
+                        ${pl.vesselTitle ? `<div class="lb-vessel-sub" title="${pl.vesselTitle}">⛵ ${pl.vesselTitle}</div>` : ''}
+                        <div class="lb-row-bottom">
+                            <span class="lb-stats-left">${leftStatsHtml}</span>
+                            <span class="lb-charter-right" title="${charterShort}">${charterShort}</span>
                         </div>
                     </div>
                 `;
@@ -6545,23 +8531,31 @@ class GoldenJourneyGame {
             const mon = window.GAME_DATA.monuments.find(m => m.id === tile.monumentId);
             const tier = tile.monumentTier;
             const earlyLocked = (tier >= 2 && this.isEarlyGameMonumentLockActive());
+            const tierMeta = this.getMonumentTierMeta(tier);
+            const rewardPts = (tierMeta && tierMeta.rewardPoints) || (tier === 1 ? 1 : (tier === 2 ? 3 : 5));
+            const starBadgeMap = {
+                1: { stars: "★ CẤP 1", bg: "#059669", border: "#34d399" },
+                2: { stars: "★★ CẤP 2", bg: "#d97706", border: "#fde047" },
+                3: { stars: "★★★ CẤP 3", bg: "#dc2626", border: "#fb923c" }
+            };
+            const sStyle = starBadgeMap[tier] || starBadgeMap[1];
             const reqMap = {
                 1: {
                     badge: "🟢 Cấp 1 – Trạm Bước Đệm (Tối đa 1 lần)",
                     reqText: "1 🗝️ Key 1 + 1 🌾 Lúa + 2 💰 Xu + 1 AP",
-                    rewardText: "+1 ⭐ Điểm, +4 💰 Xu, Kho 8→10 ô, +1 Key 2 (hoặc +3 Xu)",
+                    rewardText: `+${rewardPts} ⭐ Điểm, +4 💰 Xu, Kho 12→16 ô, +1 Key 2 (hoặc +3 Xu)`,
                     foodReq: 1, ironReq: 0, coinReq: 2
                 },
                 2: {
                     badge: "🟡 Cấp 2 – Trung Bình (Medium)",
                     reqText: "1 🗝️ Key 2 + 2 🌾 Lúa + 3 💰 Xu + 1 AP",
-                    rewardText: "+3 ⭐ Điểm Thịnh Vượng & +4 💰 Xu (Sai: 🪨 -2 HP)",
+                    rewardText: `+${rewardPts} ⭐ Điểm Thịnh Vượng & +4 💰 Xu (Sai: 🪨 -2 HP)`,
                     foodReq: 2, ironReq: 0, coinReq: 3
                 },
                 3: {
                     badge: "🔴 Cấp 3 – Khó (Hard • Khóa sau khi giải)",
                     reqText: "1 🗝️ Key 3 + 3 🌾 Lúa + 1 ⛏️ Sắt + 6 💰 Xu + 1 AP",
-                    rewardText: "+5 ⭐ Điểm Thịnh Vượng & +5 💰 Xu (Sai: ⚡🪨 -3 HP)",
+                    rewardText: `+${rewardPts} ⭐ Điểm Thịnh Vượng & +5 💰 Xu (Sai: ⚡🪨 -3 HP)`,
                     foodReq: 3, ironReq: 1, coinReq: 6
                 }
             }[tier];
@@ -6569,7 +8563,7 @@ class GoldenJourneyGame {
             const refPlayer = this.getLocalPlayer() || this.getActivePlayer();
             let playerCheckHtml = "";
             if (earlyLocked) {
-                playerCheckHtml = `<div style="margin-top:5px; padding:4px 7px; border-radius:6px; background:rgba(185,28,28,0.28); color:#fca5a5; font-weight:800">🔒 Đang khai quật — Mở lúc 08:30</div>`;
+                playerCheckHtml = `<div style="margin-top:5px; padding:4px 7px; border-radius:6px; background:rgba(71,85,105,0.45); border:1px solid #94a3b8; color:#e2e8f0; font-weight:800">🔒 Đang khai quật — Mở lúc 08:30</div>`;
             } else if (refPlayer) {
                 const tier1Blocked = (tier === 1 && (refPlayer.tier1Visited || 0) >= 1);
                 const hasKey = (refPlayer.keys[tier] || 0) >= 1;
@@ -6590,7 +8584,11 @@ class GoldenJourneyGame {
 
             title = `${earlyLocked ? '🔒 ' : '🏛️ '}${mon.name} (${mon.province})`;
             details = `
-                <div style="margin-bottom:3px">Độ khó: <strong>${reqMap.badge}</strong></div>
+                <div style="display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin-bottom:5px">
+                    <span style="display:inline-block; padding:2px 7px; border-radius:6px; background:${earlyLocked ? '#475569' : sStyle.bg}; border:1.5px solid ${earlyLocked ? '#94a3b8' : sStyle.border}; color:#fff; font-weight:900; font-size:11px">${earlyLocked ? `🔒 CẤP ${tier} • 08:30` : sStyle.stars}</span>
+                    <span style="color:#fde68a; font-weight:800">Cần 🗝️ Key ${tier}</span>
+                    <span style="color:#86efac; font-weight:900">+${rewardPts} ⭐ Thịnh Vượng</span>
+                </div>
                 <div style="background:rgba(197,155,39,0.16); border:1px solid rgba(229,195,101,0.45); border-radius:6px; padding:4px 7px; margin:4px 0">
                     📋 <strong>Yêu cầu mở cổng Di tích:</strong><br/>
                     <span style="color:#ffd54f; font-weight:800">${reqMap.reqText}</span>
@@ -6600,8 +8598,15 @@ class GoldenJourneyGame {
             `;
         } else if (tile.isPort) {
             const portInv = this.getPortInventory(tile.regionId);
+            const viewer = this.getLocalPlayer() || this.getActivePlayer();
+            const canSee = this.canInspectPortDetails(viewer, tile.regionId);
+            const keyInfoHtml = !canSee
+                ? `<strong>🔒 Cập bến hoặc giữ Thương quyền để xem Key & Kho</strong>`
+                : (portInv && portInv.availableKeyTier !== null && portInv.availableKeyTier !== undefined && !this.isTierExhausted(portInv.availableKeyTier))
+                    ? `<strong>🗝️ Key ${portInv.availableKeyTier} (${portInv.keyStock}/1)</strong>`
+                    : `<strong>🗝️ Tạm trống Chìa Khóa</strong>`;
             title = `⚓ ${tile.portName} (${tile.region.name})`;
-            details = `Mua Đặc sản: ${tile.region.specialty.icon} ${tile.region.specialty.shortName} (1 Xu) • Bán cách 1 vùng: 2 Xu (+1) / ≥2 vùng: 3 Xu (+2)<br/>📦 Mở bán: 1 Xu = 2 Lúa / 3 Gỗ / 1 Sắt • 🛡️ Bảo Hiểm Hàng Hải (10 Xu) • Đang có: <strong>🗝️ Key ${portInv.availableKeyTier} (${portInv.keyStock}/1)</strong>`;
+            details = `Mua Đặc sản: ${tile.region.specialty.icon} ${tile.region.specialty.shortName} (2 Xu) • 🛡️ Bảo Hiểm Hàng Hải (10 Xu)<br/>📦 Tình trạng Key: ${keyInfoHtml}`;
         } else if (tile.resourceType) {
             const rMap = { food: "🌾 Vựa Lúa / Ngư Trường (Hồi 2 vòng)", wood: "🌲 Lâm Trường Gỗ (Hồi 3 vòng)", iron: "⛏️ Mỏ Khoáng Sản Sắt (Hồi 4 vòng)" };
             title = rMap[tile.resourceType];
@@ -6632,94 +8637,538 @@ class GoldenJourneyGame {
         tooltip.classList.remove("hidden");
     }
 
-    openAtlasModal(regionFilter = "all") {
-        const shortTabNames = [
-            "⛰️ Bắc Bộ",
-            "🌾 ĐB Sông Hồng",
-            "🌊 Miền Trung",
-            "☕ Tây Nguyên",
-            "🏙️ Đông Nam Bộ",
-            "🛶 ĐBSCL"
+    // ------------------------------------------------------------------------
+    // UPGRADED VISUAL 6-REGION ATLAS (7 TABS + LIVE SEARCH + ACADEMIC CARDS)
+    // ------------------------------------------------------------------------
+    getAtlasRegionMeta(regionId) {
+        const metaMap = {
+            0: {
+                shortTab: "TD&MN Bắc Bộ",
+                portName: "Cảng Cái Lân",
+                tips: [
+                    "<strong>Từ khóa Quiz dễ gặp:</strong> <strong>Quảng Ninh</strong> là tỉnh duy nhất của vùng có biển; dẫn đầu cả nước về <strong>khoáng sản (than Antraxit)</strong>, <strong>thủy điện</strong> và <strong>chè Shan tuyết</strong>.",
+                    "<strong>Liên kết giao thương:</strong> Ôm <em>Chè Shan &amp; Than Quảng Ninh</em> từ Cảng Cái Lân xuôi Nam sang Miền Trung / Nam Bộ ăn chênh lệch tới <span class=\"hl-mint\">+5 💰 Xu</span>!"
+                ]
+            },
+            1: {
+                shortTab: "ĐB Sông Hồng",
+                portName: "Cảng Hải Phòng",
+                tips: [
+                    "<strong>Từ khóa Quiz dễ gặp:</strong> Phù sa hệ thống sông Hồng – Thái Bình, có <strong>hệ thống đê ngăn lũ</strong>; khí hậu có mùa đông lạnh giúp phát triển <strong>vụ Đông</strong> thành vụ chính và <strong>năng suất lúa cao nhất cả nước</strong>.",
+                    "<strong>Liên kết giao thương:</strong> Cảng Hải Phòng kết nối nhanh với Cái Lân &amp; tuyến xuyên Việt — trung tâm trao đổi <em>Gốm Bát Tràng &amp; Lụa cổ</em>."
+                ]
+            },
+            2: {
+                shortTab: "BTB & DH Miền Trung",
+                portName: "Cảng Tiên Sa",
+                tips: [
+                    "<strong>Từ khóa Quiz dễ gặp:</strong> Lãnh thổ hẹp ngang; mùa hạ chịu <strong>gió Phơn Tây Nam khô nóng (Gió Lào)</strong>; mùa mưa bão <strong>lệch về thu – đông</strong>; thế mạnh <strong>kinh tế biển tổng hợp &amp; Con đường Di sản</strong>.",
+                    "<strong>Liên kết giao thương:</strong> Vị trí bản lề giữa Bắc – Nam giúp Cảng Tiên Sa xoay vòng Đặc sản hai đầu đất nước cực nhanh."
+                ]
+            },
+            3: {
+                shortTab: "Tây Nguyên",
+                portName: "Cảng Quy Nhơn",
+                tips: [
+                    "<strong>Từ khóa Quiz dễ gặp:</strong> <strong>Vùng duy nhất không giáp biển</strong>, địa hình cao nguyên xếp tầng phủ <strong>đất đỏ bazan</strong>; đứng số 1 cả nước về <strong>cà phê</strong>, trữ lượng <strong>quặng Bô-xít</strong> khổng lồ.",
+                    "<strong>Liên kết giao thương:</strong> Xuất khẩu <em>Cà phê Buôn Ma Thuột &amp; Hồ tiêu</em> ra biển qua cửa ngõ <strong>Cảng Quy Nhơn</strong> sang hai miền Bắc – Nam."
+                ]
+            },
+            4: {
+                shortTab: "Đông Nam Bộ",
+                portName: "Cảng Cái Mép – Sài Gòn",
+                tips: [
+                    "<strong>Từ khóa Quiz dễ gặp:</strong> <strong>Đầu tàu kinh tế số 1 Việt Nam</strong> (dẫn đầu GDP, công nghiệp công nghệ cao, FDI); thủ phủ <strong>cây cao su</strong> và khai thác <strong>dầu khí thềm lục địa</strong>.",
+                    "<strong>Liên kết giao thương:</strong> Trong game, Đông Nam Bộ luôn là <span class=\"hl-mint\">🌐 Vùng Tự Do (Thuế cập bến 0 💰)</span> — bến đỗ an toàn nhất khi kẹt Xu!"
+                ]
+            },
+            5: {
+                shortTab: "ĐB Sông Cửu Long",
+                portName: "Cảng Cần Thơ – Cửu Long",
+                tips: [
+                    "<strong>Từ khóa Quiz dễ gặp:</strong> Đồng bằng châu thổ rộng nhất (~40.000 km²), <strong>vựa lúa số 1 Việt Nam</strong> (&gt;50% sản lượng lúa, &gt;90% xuất khẩu gạo ST25) và dẫn đầu <strong>thủy sản, trái cây nhiệt đới</strong>.",
+                    "<strong>Liên kết giao thương:</strong> Gần kề Đông Nam Bộ (kết nối chế biến – xuất khẩu) và cực lời khi chở <em>Gạo thơm ST25</em> ngược ra Miền Bắc bán giá <span class=\"hl-mint\">7 💰 Xu</span>!"
+                ]
+            }
+        };
+        return metaMap[regionId] || { shortTab: "Vùng", portName: "Thương Cảng", tips: [] };
+    }
+
+    highlightAtlasKeywords(text, kind = "terrain") {
+        let out = String(text || "");
+        const pairs = kind === "terrain" ? [
+            [/Hoàng Liên Sơn|Karst|đất đỏ bazan|phù sa|châu thổ|hẹp ngang|dãy Trường Sơn|bán bình nguyên|40\.000 km²|đê ngăn lũ/gi, '<span class="hl-sky">$&</span>'],
+            [/cao nguyên xếp tầng|vũng vịnh nước sâu|sông Tiền - sông Hậu/gi, '<span class="hl-gold">$&</span>']
+        ] : kind === "climate" ? [
+            [/mùa đông lạnh|gió mùa Đông Bắc|gió Phơn Tây Nam khô nóng|bão nhiệt đới|lệch về thu - đông/gi, '<span class="hl-rose">$&</span>'],
+            [/vụ Đông|hai mùa mưa - khô|mùa nước nổi|Cận xích đạo|rất ít chịu ảnh hưởng trực tiếp của bão/gi, '<span class="hl-sky">$&</span>']
+        ] : [
+            [/số 1 cả nước|số 1 Việt Nam|lớn nhất|cao nhất|dẫn đầu|Chè|Cà phê|Bô-xít|dầu khí|Cao su|>50% sản lượng lúa|>90% xuất khẩu gạo|FDI/gi, '<span class="hl-mint">$&</span>'],
+            [/than Quảng Ninh|thủy điện|thâm canh lúa nước|Kinh tế biển tổng hợp|Con đường Di sản Thế giới|thủy sản/gi, '<span class="hl-gold">$&</span>']
         ];
-        const allRegions = window.GAME_DATA.regions || [];
-        const visibleRegions = regionFilter === "all"
-            ? allRegions
-            : allRegions.filter(r => String(r.id) === String(regionFilter));
+        pairs.forEach(([rx, rep]) => {
+            out = out.replace(rx, rep);
+        });
+        return out;
+    }
 
-        const filterTabsHtml = `
-            <div class="atlas-filter-tabs">
-                <button class="atlas-tab-btn ${regionFilter === 'all' ? 'active' : ''}" onclick="window.GAME.openAtlasModal('all')">
-                    🌐 Tất Cả (6 Vùng)
-                </button>
-                ${allRegions.map(r => `
-                    <button class="atlas-tab-btn ${String(regionFilter) === String(r.id) ? 'active' : ''}" onclick="window.GAME.openAtlasModal('${r.id}')">
-                        ${shortTabNames[r.id] || r.name}
-                    </button>
-                `).join("")}
-            </div>
-        `;
+    renderAtlasMonumentCard(m) {
+        const lesson = m.geographyLesson || {};
+        const keyFacts = Array.isArray(lesson.keyFacts) ? lesson.keyFacts : [];
+        const factsHtml = keyFacts.map(f => {
+            const idx = f.indexOf(":");
+            if (idx > 0 && idx < 42) {
+                return `<li><strong style="color:#fde68a">${f.slice(0, idx + 1)}</strong>${f.slice(idx + 1)}</li>`;
+            }
+            return `<li>${f}</li>`;
+        }).join("");
 
-        const regionsHtml = visibleRegions.map(r => {
-            const mons = window.GAME_DATA.monuments.filter(m => m.id === r.id || m.regionId === r.id);
-            return `
-                <div class="atlas-region-card" style="border-left: 6px solid ${r.color}">
-                    <div class="atlas-region-header">
-                        <span class="atlas-region-title" style="color:${r.color}">${r.id + 1}. ${r.name}</span>
-                        <span class="atlas-region-en">${r.enName}</span>
-                    </div>
-                    <div class="atlas-2col-grid">
-                        <ul class="atlas-facts-list">
-                            <li><strong>🏔️ Địa hình:</strong> ${r.terrainDesc}</li>
-                            <li><strong>🌤️ Khí hậu:</strong> ${r.climateDesc}</li>
-                            <li><strong>📈 Thế mạnh kinh tế:</strong> ${r.strengths}</li>
-                        </ul>
-                        <div class="atlas-right-col">
-                            <div class="atlas-specialty-highlight">
-                                <span class="atlas-spec-icon">${r.specialty.icon}</span>
-                                <div>
-                                    <div class="atlas-spec-name">Đặc sản: ${r.specialty.name}</div>
-                                    <div class="atlas-spec-sub">Giá gốc tại Cảng: <strong>1 💰 Xu</strong> • Bán liên vùng: <strong>2–3 💰 Xu</strong></div>
-                                </div>
-                            </div>
-                            <div class="atlas-monuments-stack">
-                                ${mons.map(m => `
-                                    <div class="atlas-mon-chip" onclick="window.GAME.previewMonumentEncyclopedia('${m.id}')" title="Nhấn để xem ảnh thực tế & hồ sơ Di tích">
-                                        <img src="${m.image}" alt="${m.name}" />
-                                        <div>
-                                            <div style="font-weight:800; font-size:13px; color:#fde68a">🏛️ ${m.name} (${m.province})</div>
-                                            <div style="font-size:11px; color:#cbd5e1; margin-top:2px">📸 ${m.photoAuthor} (${m.photoLicense}) • <u>Xem chi tiết ↗</u></div>
-                                        </div>
-                                    </div>
-                                `).join("")}
-                            </div>
+        const hasValidUrl = Boolean(m.photoSourceUrl && /^https?:\/\//i.test(String(m.photoSourceUrl).trim()));
+        const inlineSourceParts = [m.photoAuthor, m.photoLicense].filter(Boolean);
+        const citeLines = [];
+        if (inlineSourceParts.length > 0) citeLines.push(`📸 ${inlineSourceParts.join(" • ")}`);
+        if (hasValidUrl) {
+            const cleanUrl = String(m.photoSourceUrl).trim();
+            citeLines.push(`🔗 Trang nguồn gốc: <a href="${cleanUrl}" target="_blank" rel="noopener noreferrer" class="atlas-lb-source-link">${cleanUrl} ↗</a>`);
+        }
+        if (m.articleSourceCite) citeLines.push(`📚 ${m.articleSourceCite}`);
+
+        return `
+            <div class="atlas-mon-card">
+                <div class="atlas-mon-top">
+                    <div class="atlas-mon-thumb-col">
+                        <div class="atlas-mon-thumb-wrap" onclick="window.GAME && window.GAME.openAtlasLightboxByMonument('${m.id}')" title="Bấm để phóng to ảnh &amp; xem nguồn gốc">
+                            <img src="${m.image}" alt="${m.name}" class="atlas-mon-thumb" />
+                            <span class="atlas-zoom-hint-badge">🔍 Phóng to</span>
                         </div>
+                        ${(inlineSourceParts.length > 0 || hasValidUrl) ? `
+                            <div class="atlas-inline-credit">
+                                ${m.photoAuthor ? `<div>${m.photoAuthor}</div>` : ""}
+                                ${hasValidUrl ? `<a href="${String(m.photoSourceUrl).trim()}" target="_blank" rel="noopener noreferrer">Trang nguồn gốc ↗</a>` : ""}
+                            </div>
+                        ` : ""}
+                    </div>
+                    <div class="atlas-mon-info">
+                        <div class="atlas-mon-head-row">
+                            <span class="atlas-mon-name">🏛️ ${m.name} <span style="font-size:12px; color:#cbd5e1; font-weight:700">(${m.province})</span></span>
+                            <span class="atlas-mon-relic-pill">${m.relicIcon || "✨"} ${m.relicName || "Báu Vật"}</span>
+                        </div>
+                        <div class="atlas-mon-headline">${lesson.headline || ""}</div>
+                        ${this.isGameStarted ? `
+                            <div class="atlas-mon-btn-row">
+                                <button type="button" class="atlas-mon-inspect-btn" onclick="window.GAME.previewMonumentEncyclopedia('${m.id}')">
+                                    🔍 Xem Di Tích
+                                </button>
+                            </div>
+                        ` : ""}
                     </div>
                 </div>
+                <details class="atlas-mon-accordion">
+                    <summary>📖 Tóm tắt kiến thức Địa lý &amp; Nguồn học thuật</summary>
+                    <div class="atlas-mon-lesson-body">
+                        <div>${lesson.summary || ""}</div>
+                        ${factsHtml ? `<ul class="atlas-mon-facts">${factsHtml}</ul>` : ""}
+                        ${citeLines.length > 0 ? `<div class="atlas-mon-cite">${citeLines.join("<br/>")}</div>` : ""}
+                    </div>
+                </details>
+            </div>
+        `;
+    }
+
+    // ------------------------------------------------------------------------
+    // ATLAS IMAGE LIGHTBOX (EXACT VERIFIED SOURCE METADATA — ZERO FABRICATION)
+    // ------------------------------------------------------------------------
+    openAtlasLightboxByMonument(monId) {
+        const monuments = (window.GAME_DATA && window.GAME_DATA.monuments) || [];
+        const regions = (window.GAME_DATA && window.GAME_DATA.regions) || [];
+        const mon = monuments.find(m => m.id === monId);
+        if (!mon || !mon.image) return;
+        const reg = regions.find(r => r.id === mon.regionId);
+        const subParts = [mon.province, reg ? reg.name : ""].filter(Boolean);
+        this.openAtlasLightbox({
+            src: mon.image,
+            title: mon.name || "",
+            subtitle: subParts.join(" • "),
+            photoAuthor: mon.photoAuthor || "",
+            photoLicense: mon.photoLicense || "",
+            photoSourceUrl: mon.photoSourceUrl || "",
+            articleSourceCite: mon.articleSourceCite || "",
+            visualCredit: ""
+        });
+    }
+
+    openAtlasLightboxByVisual(imgSrc, visualCaption = "", visualCredit = "") {
+        const cleanSrc = String(imgSrc || "").trim();
+        if (!cleanSrc) return;
+        const monuments = (window.GAME_DATA && window.GAME_DATA.monuments) || [];
+        const regions = (window.GAME_DATA && window.GAME_DATA.regions) || [];
+        // Match against existing monuments by exact image path or filename to surface verified metadata
+        const baseName = cleanSrc.split("/").pop();
+        const matchedMon = monuments.find(m =>
+            m.image === cleanSrc || (baseName && m.image && m.image.split("/").pop() === baseName)
+        );
+        const reg = matchedMon ? regions.find(r => r.id === matchedMon.regionId) : null;
+        const title = (matchedMon && matchedMon.name) || visualCaption || "Hình minh họa Địa lý";
+        const subParts = [];
+        if (matchedMon && matchedMon.province) subParts.push(matchedMon.province);
+        if (reg && reg.name) subParts.push(reg.name);
+        if (visualCaption && visualCaption !== title) subParts.push(visualCaption);
+
+        this.openAtlasLightbox({
+            src: cleanSrc,
+            title,
+            subtitle: subParts.join(" • "),
+            photoAuthor: (matchedMon && matchedMon.photoAuthor) || "",
+            photoLicense: (matchedMon && matchedMon.photoLicense) || "",
+            photoSourceUrl: (matchedMon && matchedMon.photoSourceUrl) || "",
+            articleSourceCite: (matchedMon && matchedMon.articleSourceCite) || "",
+            visualCredit: String(visualCredit || "").trim()
+        });
+    }
+
+    openAtlasLightbox(payload) {
+        if (!payload || !payload.src) return;
+        const overlay = document.getElementById("atlas-lightbox-overlay");
+        const imgEl = document.getElementById("atlas-lb-img");
+        const titleEl = document.getElementById("atlas-lb-title");
+        const subEl = document.getElementById("atlas-lb-sub");
+        const metaEl = document.getElementById("atlas-lb-meta");
+        if (!overlay || !imgEl || !metaEl) return;
+
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+        imgEl.src = payload.src;
+        imgEl.alt = payload.title || "";
+        if (titleEl) titleEl.textContent = payload.title || "";
+        if (subEl) {
+            subEl.textContent = payload.subtitle || "";
+            subEl.style.display = payload.subtitle ? "" : "none";
+        }
+
+        // Render ONLY verified non-empty fields via safe DOM APIs (NEVER fabricate missing data)
+        metaEl.textContent = "";
+        const appendTextLine = (icon, label, value) => {
+            const cleanVal = String(value || "").trim();
+            if (!cleanVal) return;
+            const line = document.createElement("div");
+            line.className = "atlas-lb-meta-line";
+            const lbl = document.createElement("span");
+            lbl.className = "atlas-lb-meta-label";
+            lbl.textContent = label ? `${icon} ${label}: ` : `${icon} `;
+            const val = document.createElement("span");
+            val.textContent = cleanVal;
+            line.appendChild(lbl);
+            line.appendChild(val);
+            metaEl.appendChild(line);
+        };
+
+        const authorLic = [payload.photoAuthor, payload.photoLicense]
+            .map(s => String(s || "").trim())
+            .filter(Boolean)
+            .join(" • ");
+        if (authorLic) appendTextLine("📸", "", authorLic);
+
+        const rawUrl = String(payload.photoSourceUrl || "").trim();
+        if (/^https?:\/\//i.test(rawUrl)) {
+            const line = document.createElement("div");
+            line.className = "atlas-lb-meta-line";
+            const lbl = document.createElement("span");
+            lbl.className = "atlas-lb-meta-label";
+            lbl.textContent = "🔗 Trang nguồn gốc: ";
+            const a = document.createElement("a");
+            a.className = "atlas-lb-source-link";
+            a.href = rawUrl;
+            a.target = "_blank";
+            a.rel = "noopener noreferrer";
+            a.textContent = `${rawUrl} ↗`;
+            line.appendChild(lbl);
+            line.appendChild(a);
+            metaEl.appendChild(line);
+        }
+
+        if (payload.visualCredit) appendTextLine("⚖️", "Trích dẫn ảnh", payload.visualCredit);
+        if (payload.articleSourceCite) appendTextLine("📚", "", payload.articleSourceCite);
+
+        metaEl.style.display = metaEl.childNodes.length > 0 ? "" : "none";
+        overlay.classList.remove("hidden");
+    }
+
+    closeAtlasLightbox() {
+        const overlay = document.getElementById("atlas-lightbox-overlay");
+        if (overlay) overlay.classList.add("hidden");
+    }
+
+    isAtlasLightboxOpen() {
+        const overlay = document.getElementById("atlas-lightbox-overlay");
+        return Boolean(overlay && !overlay.classList.contains("hidden"));
+    }
+
+    renderAtlasBodyHtml(activeTab = "all", searchQuery = "") {
+        const allRegions = (window.GAME_DATA && window.GAME_DATA.regions) || [];
+        const allMonuments = (window.GAME_DATA && window.GAME_DATA.monuments) || [];
+        const normQ = this.normalizeRuleSearch(searchQuery);
+
+        // LIVE CROSS-ATLAS SEARCH MODE
+        if (normQ) {
+            const matchedRegions = allRegions.filter(r => {
+                const meta = this.getAtlasRegionMeta(r.id);
+                const hay = this.normalizeRuleSearch(
+                    `${r.name} ${r.enName} ${r.code} ${meta.portName} ${r.terrainDesc} ${r.climateDesc} ${r.strengths} ${r.specialty.name} ${r.specialty.shortName} ${r.specialty.desc} ${meta.tips.join(" ")}`
+                );
+                return hay.includes(normQ);
+            });
+            const matchedMons = allMonuments.filter(m => {
+                const lesson = m.geographyLesson || {};
+                const hay = this.normalizeRuleSearch(
+                    `${m.name} ${m.enName || ""} ${m.province} ${m.relicName || ""} ${lesson.headline || ""} ${lesson.summary || ""} ${(lesson.keyFacts || []).join(" ")}`
+                );
+                return hay.includes(normQ);
+            });
+
+            const totalHits = matchedRegions.length + matchedMons.length;
+            if (totalHits === 0) {
+                return `
+                    <div class="rule-visual-card" style="text-align:center; padding:24px 16px; margin-bottom:12px">
+                        <div style="font-size:24px; margin-bottom:6px">🔍</div>
+                        <div style="font-weight:800; color:#fde68a">Không tìm thấy Vùng, Đặc sản hoặc Di tích khớp với "${searchQuery.replace(/[<>&"]/g, "")}"</div>
+                        <div style="font-size:12px; color:#9cc4d4; margin-top:4px">Thử tìm: <strong>Hạ Long, Cà phê, Bazan, Gió Lào, ST25, Quy Nhơn, Hải Phòng</strong></div>
+                    </div>
+                `;
+            }
+
+            return `
+                <div style="font-size:12px; font-weight:800; color:#123142; margin-bottom:9px">
+                    🔎 Tìm thấy <strong>${totalHits}</strong> kết quả (${matchedRegions.length} Vùng/Đặc sản • ${matchedMons.length} Di tích):
+                </div>
+                ${matchedRegions.length > 0 ? `
+                    <div class="atlas-overview-grid">
+                        ${matchedRegions.map(r => {
+                            const meta = this.getAtlasRegionMeta(r.id);
+                            const mons = allMonuments.filter(m => m.regionId === r.id);
+                            return `
+                                <div class="atlas-ov-card" onclick="window.GAME.openAtlasModal('${r.id}')" title="Bấm để xem chi tiết ${r.name}">
+                                    <div class="atlas-ov-colorbar" style="background:${r.color}"></div>
+                                    <div class="atlas-ov-body">
+                                        <div class="atlas-ov-top">
+                                            <span class="atlas-ov-name">${r.id + 1}. ${r.name}</span>
+                                            <span class="atlas-code-pill">${r.code}</span>
+                                        </div>
+                                        <div class="atlas-ov-badges">
+                                            <div class="atlas-ov-line"><strong>⚓ Cảng:</strong> <span>${meta.portName}</span></div>
+                                            <div class="atlas-ov-line"><strong>📦 Đặc sản:</strong> <span>${r.specialty.icon} ${r.specialty.shortName}</span></div>
+                                            <div class="atlas-ov-line"><strong>🏛️ Di tích (${mons.length}):</strong> <span>${mons.map(m => m.name).join(" • ")}</span></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        }).join("")}
+                    </div>
+                ` : ""}
+                ${matchedMons.length > 0 ? `
+                    <div class="atlas-section-title">🏛️ Di Tích Khớp Từ Khóa (${matchedMons.length})</div>
+                    <div class="atlas-mon-list">
+                        ${matchedMons.map(m => this.renderAtlasMonumentCard(m)).join("")}
+                    </div>
+                ` : ""}
             `;
-        }).join("");
+        }
+
+        // TAB 0: 🇻🇳 TOÀN CẢNH 6 VÙNG (NORTH -> SOUTH OVERVIEW GRID)
+        if (activeTab === "all") {
+            return `
+                <div class="atlas-overview-grid">
+                    ${allRegions.map(r => {
+                        const meta = this.getAtlasRegionMeta(r.id);
+                        const mons = allMonuments.filter(m => m.regionId === r.id);
+                        return `
+                            <div class="atlas-ov-card" onclick="window.GAME.openAtlasModal('${r.id}')" title="Bấm để mở hồ sơ chi tiết ${r.name}">
+                                <div class="atlas-ov-colorbar" style="background:${r.color}"></div>
+                                <div class="atlas-ov-body">
+                                    <div class="atlas-ov-top">
+                                        <span class="atlas-ov-name">${r.id + 1}. ${r.name}</span>
+                                        <span class="atlas-code-pill">${r.code}</span>
+                                    </div>
+                                    <div class="atlas-ov-badges">
+                                        <div class="atlas-ov-line"><strong>⚓ Cảng:</strong> <span>${meta.portName}</span></div>
+                                        <div class="atlas-ov-line"><strong>📦 Đặc sản:</strong> <span>${r.specialty.icon} ${r.specialty.shortName}</span></div>
+                                        <div class="atlas-ov-line"><strong>🏛️ Di tích (${mons.length}):</strong> <span>${mons.map(m => m.name).join(" • ")}</span></div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }).join("")}
+                </div>
+            `;
+        }
+
+        // DETAIL TAB FOR REGION 0..5
+        const r = allRegions.find(reg => String(reg.id) === String(activeTab)) || allRegions[0];
+        if (!r) return "";
+        const meta = this.getAtlasRegionMeta(r.id);
+        const mons = allMonuments.filter(m => m.regionId === r.id);
+
+        return `
+            <div class="atlas-hero-strip" style="border-left-color:${r.color}">
+                <div class="atlas-hero-top">
+                    <div>
+                        <h3 class="atlas-hero-title">${r.id + 1}. ${r.name}</h3>
+                        <div class="atlas-hero-en">${r.enName}</div>
+                    </div>
+                    <span class="atlas-code-pill">${r.code}</span>
+                </div>
+                <div class="atlas-hero-pills">
+                    <span class="atlas-meta-pill">⚓ ${meta.portName}</span>
+                    <span class="atlas-meta-pill is-gold">${r.specialty.icon} Đặc sản: ${r.specialty.shortName}</span>
+                    <span class="atlas-meta-pill">🏛️ ${mons.length} Di tích</span>
+                </div>
+            </div>
+
+            <div class="atlas-3pillar-grid">
+                <div class="atlas-pillar-card">
+                    <div class="atlas-pillar-head"><span>⛰️</span><span>Địa Hình &amp; Thổ Nhưỡng</span></div>
+                    <div>${this.highlightAtlasKeywords(r.terrainDesc, "terrain")}</div>
+                </div>
+                <div class="atlas-pillar-card">
+                    <div class="atlas-pillar-head"><span>🌦️</span><span>Khí Hậu &amp; Thủy Văn</span></div>
+                    <div>${this.highlightAtlasKeywords(r.climateDesc, "climate")}</div>
+                </div>
+                <div class="atlas-pillar-card">
+                    <div class="atlas-pillar-head"><span>🏭</span><span>Thế Mạnh Kinh Tế</span></div>
+                    <div>${this.highlightAtlasKeywords(r.strengths, "strengths")}</div>
+                </div>
+            </div>
+
+            <div class="atlas-spec-banner">
+                <div class="atlas-spec-big-icon">${r.specialty.icon}</div>
+                <div class="atlas-spec-content">
+                    <div class="atlas-spec-title">📦 Đặc Sản Vùng: ${r.specialty.name}</div>
+                    <div class="atlas-spec-desc">${r.specialty.desc}</div>
+                    <div class="atlas-spec-trade-strip">
+                        <span>Giá gốc tại cảng: <span class="hl-gold">2 💰</span></span>
+                        <span>•</span>
+                        <span>Chiến thuật: Mua tại <strong>${meta.portName}</strong> → Chở sang vùng khác bán ăn chênh lệch (<span class="hl-mint">+1 đến +5 💰</span>) hoặc trả Nhiệm Vụ Chung.</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="atlas-section-title">🏛️ Di Tích Lịch Sử – Địa Lý Của Vùng (${mons.length})</div>
+            <div class="atlas-mon-list">
+                ${mons.map(m => this.renderAtlasMonumentCard(m)).join("")}
+            </div>
+
+            <details class="rule-accordion">
+                <summary>💡 Mẹo Giao Thương &amp; Ghi Nhớ Nhanh Vùng Này</summary>
+                <div class="rule-accordion-body">
+                    ${meta.tips.map(t => `<div>• ${t}</div>`).join("")}
+                </div>
+            </details>
+        `;
+    }
+
+    filterAtlasSearch(val) {
+        this.atlasSearchQuery = String(val || "");
+        const bodyEl = document.getElementById("atlas-dynamic-body");
+        const clearBtn = document.getElementById("atlas-search-clear");
+        if (clearBtn) clearBtn.classList.toggle("hidden", !this.atlasSearchQuery.trim());
+        if (bodyEl) {
+            bodyEl.innerHTML = this.renderAtlasBodyHtml(this.selectedAtlasTab || "all", this.atlasSearchQuery);
+        }
+    }
+
+    clearAtlasSearch() {
+        const inp = document.getElementById("atlas-search-input");
+        if (inp) {
+            inp.value = "";
+            inp.focus();
+        }
+        this.filterAtlasSearch("");
+    }
+
+    openAtlasModal(regionFilter = "all") {
+        const allRegions = (window.GAME_DATA && window.GAME_DATA.regions) || [];
+        const activeTab = (regionFilter === undefined || regionFilter === null) ? "all" : String(regionFilter);
+        this.selectedAtlasTab = activeTab;
+        this.atlasSearchQuery = "";
+
+        const navTabs = [
+            { id: "all", shortLabel: "Toàn Cảnh", label: "🇻🇳 Toàn Cảnh 6 Vùng", color: null },
+            ...allRegions.map(r => {
+                const meta = this.getAtlasRegionMeta(r.id);
+                return { id: String(r.id), shortLabel: meta.shortTab, label: meta.shortTab, color: r.color };
+            })
+        ];
+        const curIdx = Math.max(0, navTabs.findIndex(t => t.id === activeTab));
+        const prevTab = curIdx > 0 ? navTabs[curIdx - 1] : null;
+        const nextTab = curIdx < navTabs.length - 1 ? navTabs[curIdx + 1] : null;
+        const posLabel = curIdx === 0 ? "Toàn cảnh" : `Vùng ${curIdx}/6`;
 
         const html = `
             <div class="modal-sticky-top">
-                <div class="modal-sticky-head-row">
+                <div class="rule-header-bar">
                     <div>
-                        <div class="modal-header-badge" style="background:#0f2942; border-color:#e6b84a; color:#fde68a; margin-bottom:4px">
-                            <span>🗺️ CẨM NANG ĐỊA LÝ 6 VÙNG KINH TẾ &amp; HỒ SƠ BẢN QUYỀN</span>
+                        <div class="modal-header-badge" style="background:#123142; border-color:#e6b84a; color:#fde68a; margin-bottom:2px">
+                            <span>🗺️ CẨM NANG 6 VÙNG KINH TẾ VIỆT NAM — ATLAS HẢI TRÌNH</span>
                         </div>
-                        <h2 class="modal-title" style="margin:2px 0 0 0; font-size:19px">Bách Khoa Toàn Thư 6 Vùng Kinh Tế Việt Nam</h2>
+                    </div>
+                    <div class="rule-search-wrap">
+                        <input type="text" id="atlas-search-input" class="rule-search-input"
+                               placeholder="🔍 Tìm nhanh: Hạ Long, Cà phê, Bazan, Gió Lào, ST25..."
+                               oninput="window.GAME && window.GAME.filterAtlasSearch(this.value)" />
+                        <button type="button" id="atlas-search-clear" class="rule-search-clear hidden"
+                                title="Xóa tìm kiếm" onclick="window.GAME && window.GAME.clearAtlasSearch()">✕</button>
                     </div>
                 </div>
-                ${filterTabsHtml}
+                <div class="rule-cat-tabs">
+                    ${navTabs.map(t => `
+                        <button class="rule-cat-tab ${activeTab === t.id ? 'active' : ''}"
+                                onclick="window.GAME.openAtlasModal('${t.id}')">
+                            ${t.color ? `<span class="atlas-tab-dot" style="background:${t.color}"></span>` : ""}${t.label}
+                        </button>
+                    `).join("")}
+                </div>
             </div>
 
-            <div class="atlas-list-container">
-                ${regionsHtml}
+            <div id="atlas-dynamic-body">
+                ${this.renderAtlasBodyHtml(activeTab, "")}
             </div>
 
-            <div class="modal-actions">
-                <button class="btn-primary-gold" onclick="window.GAME.closeModal()">Đóng Cẩm Nang</button>
+            <div class="rule-footer-nav">
+                <div class="rule-nav-left-right">
+                    <button type="button" class="btn-secondary" ${prevTab ? '' : 'disabled'}
+                            onclick="${prevTab ? `window.GAME.openAtlasModal('${prevTab.id}')` : ''}">
+                        ← Trước
+                    </button>
+                    <div class="rule-progress-dots" title="${posLabel}">
+                        ${navTabs.map((t, i) => `<span class="rule-pdot ${i === curIdx ? 'active' : ''}" onclick="window.GAME.openAtlasModal('${t.id}')" title="${t.label}"></span>`).join("")}
+                        <span style="margin-left:4px">${posLabel}</span>
+                    </div>
+                </div>
+                <div class="rule-nav-left-right">
+                    ${nextTab ? `
+                        <button type="button" class="btn-secondary" onclick="window.GAME.openAtlasModal('${nextTab.id}')">
+                            Tiếp theo: ${nextTab.shortLabel} →
+                        </button>
+                    ` : ''}
+                    <button type="button" class="btn-primary-gold" onclick="window.GAME.closeModal()">
+                        ⚓ Đóng Cẩm Nang
+                    </button>
+                </div>
             </div>
         `;
         this.showModal(html);
+
+        const searchInp = document.getElementById("atlas-search-input");
+        if (searchInp) {
+            searchInp.addEventListener("keydown", (e) => {
+                if (e.key === "Escape") {
+                    e.preventDefault();
+                    if (searchInp.value) {
+                        this.clearAtlasSearch();
+                    } else {
+                        this.closeModal();
+                    }
+                }
+            });
+        }
     }
 
     previewMonumentEncyclopedia(monId) {
@@ -6732,240 +9181,499 @@ class GoldenJourneyGame {
     // ------------------------------------------------------------------------
     // VISUAL 5-TAB RULEBOOK MODAL (V3 — SPACIOUS, COLOR-CODED, STICKY HEADER)
     // ------------------------------------------------------------------------
-    openRulebookModal(category = "overview") {
-        // Normalize legacy tab keys cleanly
-        const aliasMap = { storage_keys: "port_market", monuments_traps: "monuments_quests" };
-        const activeTab = aliasMap[category] || (category || "overview");
+    // UPGRADED STRATEGY RULEBOOK (5 VISUAL TABS + LIVE SEARCH + QUICK NAV)
+    // ------------------------------------------------------------------------
+    normalizeRuleSearch(str) {
+        return String(str || "")
+            .toLowerCase()
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/đ/g, "d")
+            .trim();
+    }
 
+    getRulebookCatalog() {
         const tabs = [
-            { id: "overview", label: "🏆 Tổng Quan & Thắng" },
-            { id: "movement_reef", label: "⛵ Di Chuyển & Đá Ngầm" },
-            { id: "port_market", label: "⚓ Kinh Tế & Chợ" },
-            { id: "monuments_quests", label: "🏛️ Di Tích & Nhiệm Vụ" },
-            { id: "weather_events", label: "🌦️ Thời Tiết & Bão" }
+            { id: "overview", shortLabel: "Chơi Trong 30s", label: "🚀 Chơi Trong 30s" },
+            { id: "movement_reef", shortLabel: "Lái Tàu & Điều Khiển", label: "⛵ Lái Tàu & Điều Khiển" },
+            { id: "port_market", shortLabel: "Cảng & Chợ P2P", label: "⚖️ Cảng & Chợ P2P" },
+            { id: "monuments_quests", shortLabel: "Di Tích & Nhiệm Vụ", label: "🏛️ Di Tích & Nhiệm Vụ" },
+            { id: "weather_events", shortLabel: "Thời Tiết & Sự Kiện", label: "⛈️ Thời Tiết & Sự Kiện" }
         ];
 
-        const sectionContent = {
-            overview: `
-                <div class="rule-visual-cards-grid">
+        // Searchable individual cards across all 5 tabs (also used for live cross-tab search!)
+        const searchableCards = [
+            // TAB 1
+            {
+                tabId: "overview",
+                keywords: "thang 15 sao 45 phut bi mat hoa diem di tich p2p xu muc tieu",
+                html: `
+                    <div class="rule-hero-banner">
+                        <div>
+                            <h3>🏆 Mục Tiêu Chiến Thắng</h3>
+                            <p>Chạm mốc <span class="hl-gold">15 ⭐ Thịnh Vượng</span> trước — HOẶC dẫn đầu khi hết <span class="hl-sky">45:00</span> (cộng điểm <strong>Lật Bài Nhiệm Vụ Bí Mật</strong>; hòa xét: Di tích → P2P → Xu).</p>
+                        </div>
+                    </div>
+                `
+            },
+            {
+                tabId: "overview",
+                keywords: "chi so ap mau hp xu von kho hang 12 16 o 30 xu 5 ap 3 ap di chuyen",
+                html: `
+                    <div class="rule-stat-strip">
+                        <div class="rule-stat-box"><span class="rs-icon">⚡</span><strong>5 AP/lượt</strong><small>Max 3 AP đi</small></div>
+                        <div class="rule-stat-box"><span class="rs-icon">❤️</span><strong>5 HP</strong><small>Độ bền tàu</small></div>
+                        <div class="rule-stat-box"><span class="rs-icon">💰</span><strong>3 → 30 Xu</strong><small>Vốn đầu → Trần</small></div>
+                        <div class="rule-stat-box"><span class="rs-icon">📦</span><strong>12 → 16 Ô</strong><small>Nâng sau Di tích 1</small></div>
+                        <div class="rule-stat-box"><span class="rs-icon">⭐</span><strong>15 Điểm</strong><small>Mốc Chiến Thắng</small></div>
+                    </div>
+                `
+            },
+            {
+                tabId: "overview",
+                keywords: "luot choi 4 buoc lai tau khai thac giao thuong di tich nhiem vu xong luot",
+                html: `
+                    <div class="rule-flow-steps">
+                        <div class="rule-flow-step"><strong>1️⃣ Lái Tàu</strong><small>Đi tối đa <span class="hl-sky">6 ô</span> (3 AP) né đá ngầm.</small></div>
+                        <div class="rule-flow-arrow">→</div>
+                        <div class="rule-flow-step"><strong>2️⃣ Khai Thác / Cảng</strong><small>Đào mỏ hoặc mua bán Đặc sản, Key.</small></div>
+                        <div class="rule-flow-arrow">→</div>
+                        <div class="rule-flow-step"><strong>3️⃣ Di Tích / Nhiệm Vụ</strong><small>Giải Quiz ăn ⭐ &amp; nâng kho 16 ô.</small></div>
+                        <div class="rule-flow-arrow">→</div>
+                        <div class="rule-flow-step"><strong>4️⃣ Xong Lượt</strong><small>Bấm Xong Lượt hoặc chờ tự chuyển.</small></div>
+                    </div>
+                `
+            },
+            // TAB 2
+            {
+                tabId: "movement_reef",
+                keywords: "di chuyen 2 buoc da ngam lai tau keo chuot chuot phai huy duong toc do 1 ap 2 o",
+                html: `
                     <div class="rule-visual-card">
                         <div class="rule-card-head">
-                            <span class="rule-card-icon">⭐</span>
-                            <h4>Điều Kiện Chiến Thắng</h4>
+                            <span class="rule-card-icon">🧭</span>
+                            <h4>Di Chuyển 2 Bước &amp; Né Đá Ngầm</h4>
                         </div>
-                        <ul class="rule-visual-list">
-                            <li>Người đầu tiên đạt tổng <span class="hl-gold">15 Điểm Thịnh Vượng</span> (Công khai + Bí mật) thắng ngay lập tức!</li>
-                            <li>Khi đồng hồ <span class="hl-sky">45:00</span> về hết giờ, hệ thống lật toàn bộ Điểm Bí Mật; người cao điểm nhất thắng (hòa xét: <strong>Số Di tích → P2P → Xu</strong>).</li>
+                        <ul class="rule-formula-list">
+                            <li>📍 <strong>Bấm lần 1:</strong> Khóa đường đi dự kiến (hoặc <strong>giữ kéo chuột</strong> vẽ đường lách né Bãi Đá Ngầm).</li>
+                            <li>⛵ <strong>Bấm lần 2 / thả chuột:</strong> Tàu chạy; bấm <span class="rule-kbd">Chuột phải</span> hoặc <span class="rule-kbd">Esc</span> để hủy đường.</li>
+                            <li>⚡ <strong>Tốc độ:</strong> Ngày thường <span class="hl-sky">1 AP = 2 ô</span> (max 6 ô) • Siêu Bão Yagi <span class="hl-rose">1 AP = 1 ô</span>.</li>
+                            <li>🪨 <strong>Bãi Đá Ngầm:</strong> Đi ngang hoặc dừng lên mất <span class="hl-rose">-1 ❤️ HP</span> mỗi ô.</li>
                         </ul>
                     </div>
+                `
+            },
+            {
+                tabId: "movement_reef",
+                keywords: "afk 50s 45s 5s may dang tu dong tu chuyen luot 0 ap bien trong dong bang dong ho bot",
+                html: `
                     <div class="rule-visual-card">
                         <div class="rule-card-head">
-                            <span class="rule-card-icon">⚡</span>
-                            <h4>Cấu Trúc Lượt Đi &amp; Đua Tốc Độ</h4>
+                            <span class="rule-card-icon">🤖</span>
+                            <h4>Tự Chuyển Lượt &amp; Chống AFK 50s</h4>
                         </div>
-                        <ul class="rule-visual-list">
-                            <li><strong>Đầu trận:</strong> Trả lời nhanh 1 Câu hỏi Địa lý để xếp thứ tự lượt đi.</li>
-                            <li>Mỗi lượt có <span class="hl-sky">5 AP</span> (tối đa <span class="hl-gold">3 AP</span> di chuyển; phần còn lại dùng tương tác Cảng, Mỏ, Di tích, Sửa tàu).</li>
+                        <ul class="rule-formula-list">
+                            <li>⏭️ <strong>Hết sạch 0 AP:</strong> Tự chuyển lượt sau <span class="hl-gold">5s</span> (PvP).</li>
+                            <li>🌊 <strong>Hết AP đi ở biển trống:</strong> Chờ <span class="hl-sky">5s</span> (đủ bấm Sửa tàu) → đếm ngược <span class="hl-gold">5s</span> tự xong lượt.</li>
+                            <li>🤖 <strong>AFK 50s (45s + 5s):</strong> Bot lái thay (<span class="hl-mint">0 phạt Xu/HP</span>), hiện bảng <strong>"Máy đang tự động"</strong>.</li>
+                            <li>✋ <strong>Lấy lại quyền lái:</strong> Chạm/bấm bất kỳ đâu trên màn hình (đồng hồ 45:00 tự <code>⏸️</code> sau 45s đứng yên).</li>
                         </ul>
                     </div>
-                    <div class="rule-visual-card">
-                        <div class="rule-card-head">
-                            <span class="rule-card-icon">🔥</span>
-                            <h4>Chuỗi Thông Thái (Mốc 5/5)</h4>
-                        </div>
-                        <ul class="rule-visual-list">
-                            <li>Đếm chuỗi câu hỏi Địa lý trả lời đúng liên tiếp (Mỏ, Tàu FDI, Di tích); trả lời sai reset về <span class="hl-rose">0/5</span>.</li>
-                            <li>Đạt đúng <span class="hl-mint">5/5 câu đúng</span> kích hoạt <strong>⛵ Thuận Buồm Xuôi Gió</strong>: lượt tiếp theo tự động được <span class="hl-mint">6 AP (+1 AP miễn phí)</span>!</li>
-                        </ul>
-                    </div>
-                    <div class="rule-visual-card">
-                        <div class="rule-card-head">
-                            <span class="rule-card-icon">🛡️</span>
-                            <h4>Sinh Tồn &amp; Bảo Hiểm Hàng Hải</h4>
-                        </div>
-                        <ul class="rule-visual-list">
-                            <li>Mỗi tàu có <span class="hl-rose">5/5 HP</span>. Sửa tàu tốn <code>1 AP + 1 Xu + 1 Gỗ</code> = <span class="hl-mint">+1 HP</span>.</li>
-                            <li>Mua <strong>🛡️ Bảo Hiểm Hàng Hải Quốc Tế</strong> (<span class="hl-gold">10 Xu</span> tại Cảng): tự động cứu tàu thoát đắm và hồi <span class="hl-mint">+2 HP</span> khi máu về 0!</li>
-                        </ul>
-                    </div>
-                </div>
-            `,
-            movement_reef: `
-                <div class="rule-visual-cards-grid">
-                    <div class="rule-visual-card">
-                        <div class="rule-card-head">
-                            <span class="rule-card-icon">⛵</span>
-                            <h4>Tốc Độ Di Chuyển Theo Thời Tiết</h4>
-                        </div>
-                        <ul class="rule-visual-list">
-                            <li><strong>Thời tiết thường:</strong> <span class="hl-sky">1 AP = 2 ô nước</span> → Tối đa <span class="hl-gold">6 ô/lượt</span> (với 3 AP di chuyển).</li>
-                            <li><strong>Siêu Bão Yagi (34:00–45:00):</strong> <span class="hl-rose">1 AP = 1 ô nước</span> → Tối đa <span class="hl-rose">3 ô/lượt</span>.</li>
-                            <li>Tàu không đi xuyên qua ô Di tích, Cảng hay Mỏ (chỉ dừng cập bến).</li>
-                        </ul>
-                    </div>
-                    <div class="rule-visual-card">
-                        <div class="rule-card-head">
-                            <span class="rule-card-icon">🪨</span>
-                            <h4>2 Cách Lái Tàu &amp; Né Bãi Đá Ngầm</h4>
-                        </div>
-                        <ul class="rule-visual-list">
-                            <li><strong>⚠️ Bãi Đá Ngầm:</strong> Đi xuyên qua hoặc dừng lên ô đá ngầm bị mất <span class="hl-rose">-1 HP</span> mỗi ô!</li>
-                            <li><strong>Click đơn (1 lần):</strong> Tự tìm đường ngắn nhất (KHÔNG tự né đá ngầm).</li>
-                            <li><strong>Click đúp + Giữ kéo chuột:</strong> Chủ động vẽ từng ô nước để <strong>lách né Đá Ngầm</strong>, thả chuột để tàu chạy!</li>
-                        </ul>
-                    </div>
-                </div>
-            `,
-            port_market: `
-                <div class="rule-visual-cards-grid">
-                    <div class="rule-visual-card">
-                        <div class="rule-card-head">
-                            <span class="rule-card-icon">⚓</span>
-                            <h4>Giao Thương 6 Cảng &amp; Reset 08:30</h4>
-                        </div>
-                        <ul class="rule-visual-list">
-                            <li>Mua Đặc sản bản địa <span class="hl-gold">2 Xu</span>: Cách 1 vùng bán <span class="hl-mint">3 Xu (+1)</span>; cách 2 vùng <span class="hl-mint">5 Xu (+3)</span>; xuyên Việt ≥ 3 vùng <span class="hl-mint">7 Xu (+5)</span>.</li>
-                            <li><strong>Kho Tài Nguyên Giới Hạn (Reset 05:00):</strong> Mỗi cảng chỉ nhập tối đa <strong>3 đơn vị/loại</strong> (2/3 loại, giá <strong>2 Xu/món</strong>). Tại cảng nhà &amp; Đông Nam Bộ có nút <strong>Xuất khẩu thô 1 Xu</strong> xoay vốn.</li>
-                            <li><strong>Tầm nhìn thông tin Cảng:</strong> Chỉ xem được Key &amp; tồn kho của <strong>cảng đang đậu</strong> và <strong>cảng Thương quyền của mình</strong>. Key xoay vòng cân bằng cứng <strong>2–2–2</strong> mỗi <span class="hl-sky">08:30</span>.</li>
-                        </ul>
-                    </div>
-                    <div class="rule-visual-card">
-                        <div class="rule-card-head">
-                            <span class="rule-card-icon">📦</span>
-                            <h4>Kho Hàng, Ngân Khố &amp; Khai Thác</h4>
-                        </div>
-                        <ul class="rule-visual-list">
-                            <li><strong>Thương quyền 5+1 &amp; Thuế Cập Bến:</strong> Đầu trận chia ngẫu nhiên 5 vùng (0, 1, 2, 3, 5) cho người chơi; riêng <strong>Đông Nam Bộ</strong> luôn là <strong>🌐 Vùng Tự Do (Thuế 0 Xu)</strong>. Vào cảng người khác phải đóng <strong>1 💰 Xu thuế</strong> (có 0 Xu sẽ bị chặn vào cảng!).</li>
-                            <li>Ngân khố khởi đầu <span class="hl-gold">3 Xu</span> (tối đa <span class="hl-gold">30 Xu</span>); Kho <span class="hl-sky">12 ô</span>, tự động nâng vĩnh viễn lên <span class="hl-mint">16 ô</span> ngay sau khi chinh phục <strong>Di tích đầu tiên (mọi cấp)</strong>. <strong>Chìa khóa &amp; Bảo Hiểm = 0 ô kho!</strong></li>
-                            <li><strong>Khai thác Mỏ (1 AP):</strong> Đúng <span class="hl-mint">+2 Tài nguyên</span> / Sai <span class="hl-gold">+1 Tài nguyên</span> (không nhận Xu). Hồi: Lúa 2v, Gỗ 3v, Sắt 4v.</li>
-                        </ul>
-                    </div>
+                `
+            },
+            {
+                tabId: "movement_reef",
+                keywords: "phim tat l nhan ban do esc sua tau bao hiem hang hai 10 xu hoi 2 hp",
+                html: `
                     <div class="rule-visual-card full-span">
                         <div class="rule-card-head">
-                            <span class="rule-card-icon">🤝</span>
-                            <h4>Chợ P2P (0 AP Mọi Lúc) &amp; Tàu FDI Quốc Tế</h4>
+                            <span class="rule-card-icon">⌨️</span>
+                            <h4>Phím Tắt, Hiển Thị &amp; Sinh Tồn</h4>
                         </div>
-                        <ul class="rule-visual-list">
-                            <li><strong>⚖️ Chợ Hàng Hải P2P (0 AP Mọi Lượt):</strong> Chỉ giao dịch <strong>Lúa, Gỗ, Sắt &amp; Đặc sản</strong> (cấm Key &amp; Bảo Hiểm). <strong>Mua/Bán bằng Xu</strong> (Sàn Bán &amp; Đơn Cần Mua) là <strong>🎭 Ẩn danh hoàn toàn</strong>; <strong>Đổi Hàng Barter 0 Xu</strong> là <strong>👁️ Công khai</strong> tên, màu tàu &amp; Thương quyền!</li>
-                            <li><strong>🚢 Thương Đoàn Quốc Tế (Tàu FDI):</strong> Xuất hiện ngẫu nhiên mỗi 4–5 vòng; cập bến khảo sát nhận ngay <span class="hl-gold">+2 đến +3 Xu</span>!</li>
+                        <ul class="rule-formula-list">
+                            <li>🏷️ Phím <span class="rule-kbd">L</span>: Xoay 4 chế độ nhãn bản đồ (<span class="hl-sky">Gọn → Đầy đủ → Vùng &amp; Bão → Ẩn</span>) • <span class="rule-kbd">Esc</span>: Đóng cửa sổ / hủy đường.</li>
+                            <li>🛠️ <strong>Sửa tàu:</strong> <span class="hl-gold">1 AP + 1 💰 + 1 🌲 = +1 ❤️ HP</span> • <strong>🛡️ Bảo Hiểm Hàng Hải</strong> (<span class="hl-gold">10 💰</span>): Tự hồi <span class="hl-mint">+2 ❤️ HP</span> khi máu về 0 (<span class="hl-mint">0 ô kho</span>).</li>
                         </ul>
                     </div>
-                </div>
-            `,
-            monuments_quests: `
-                <div class="rule-visual-cards-grid">
+                `
+            },
+            // TAB 3
+            {
+                tabId: "port_market",
+                keywords: "cang thuong quyen thue 1 xu 0 xu tu do dong nam bo p2p barter 0% thue 0 ap dac san xuat khau 5 phut",
+                html: `
+                    <div class="rule-vs-grid">
+                        <div class="rule-visual-card">
+                            <div class="rule-card-head">
+                                <span class="rule-card-icon">⚓</span>
+                                <h4>6 Thương Cảng</h4>
+                            </div>
+                            <ul class="rule-formula-list">
+                                <li>👑 <strong>Thuế cập bến:</strong> Miễn thuế Cảng nhà &amp; Đông Nam Bộ; cảng đối thủ tốn <span class="hl-rose">1 💰</span> (0 Xu bị chặn).</li>
+                                <li>📦 <strong>Kho cảng:</strong> Tối đa <span class="hl-sky">3/món</span>, tự làm mới mỗi <span class="hl-gold">5 phút</span> (Key làm mới mỗi <span class="hl-sky">08:30</span>).</li>
+                                <li>💎 <strong>Đặc sản &amp; Xuất khẩu:</strong> Mua <span class="hl-gold">2 💰</span> → bán xa lãi tới <span class="hl-mint">+5 💰</span>; xuất thô <span class="hl-gold">1 💰</span> tại cảng nhà.</li>
+                            </ul>
+                        </div>
+                        <div class="rule-vs-badge">VS</div>
+                        <div class="rule-visual-card">
+                            <div class="rule-card-head">
+                                <span class="rule-card-icon">🤝</span>
+                                <h4>Chợ P2P Tự Do</h4>
+                            </div>
+                            <ul class="rule-formula-list">
+                                <li>⚡ <strong>Chi phí:</strong> <span class="hl-mint">0% Thuế</span> • <span class="hl-mint">0 AP</span> • Giao dịch mọi lúc kể cả <strong>ngoài lượt</strong>!</li>
+                                <li>🔄 <strong>3 Loại kèo:</strong> Bán lấy Xu (ẩn danh), Đăng Mua Xu (ẩn danh), Đổi Hàng Barter (công khai).</li>
+                                <li>🌾 <strong>Hàng hóa:</strong> Lúa, Gỗ, Sắt &amp; Đặc sản (không giao dịch Key &amp; Bảo Hiểm).</li>
+                            </ul>
+                        </div>
+                    </div>
+                `
+            },
+            // TAB 4
+            {
+                tabId: "monuments_quests",
+                keywords: "di tich cap 1 cap 2 cap 3 quiz khoa 12 16 o bay tru hp",
+                html: `
+                    <div class="rule-tier-3grid">
+                        <div class="rule-tier-card tier-1">
+                            <div class="rule-tier-head"><span>★ Di Tích Cấp 1</span><span>2 Ô</span></div>
+                            <div>🔑 Phí: <span class="hl-gold">Key 1 + 1🌾 + 2💰</span></div>
+                            <div>🎁 Đúng: <span class="hl-mint">+1 ⭐, +4 💰, +Key 2</span></div>
+                            <div>⚠️ Sai: <span class="hl-rose">-1 ❤️ HP</span> (max 1 lần)</div>
+                        </div>
+                        <div class="rule-tier-card tier-2">
+                            <div class="rule-tier-head"><span>★★ Di Tích Cấp 2</span><span>4 Ô</span></div>
+                            <div>🔑 Phí: <span class="hl-gold">Key 2 + 2🌾 + 3💰</span></div>
+                            <div>🎁 Đúng: <span class="hl-mint">+3 ⭐, +4 💰</span></div>
+                            <div>⚠️ Sai: <span class="hl-rose">-2 ❤️ HP</span> (mở 08:30)</div>
+                        </div>
+                        <div class="rule-tier-card tier-3">
+                            <div class="rule-tier-head"><span>★★★ Di Tích Cấp 3</span><span>3 Ô</span></div>
+                            <div>🔑 Phí: <span class="hl-gold">Key 3 + 3🌾 + 1⛏️ + 6💰</span></div>
+                            <div>🎁 Đúng: <span class="hl-mint">+5 ⭐, +5 💰</span></div>
+                            <div>⚠️ Sai: <span class="hl-rose">-3 ❤️ HP</span> &amp; khóa ô</div>
+                        </div>
+                    </div>
+                `
+            },
+            {
+                tabId: "monuments_quests",
+                keywords: "key khan hiem 1 key cap 0 o kho khoa mua chinh phuc het 08:30 nang kho 16",
+                html: `
                     <div class="rule-visual-card">
                         <div class="rule-card-head">
-                            <span class="rule-card-icon">🔒</span>
-                            <h4>Khóa Nhịp Độ 08:30 Đầu Trận</h4>
+                            <span class="rule-card-icon">🔑</span>
+                            <h4>Key Khan Hiếm &amp; Nâng Kho 16 Ô</h4>
                         </div>
-                        <ul class="rule-visual-list">
-                            <li>Từ <span class="hl-rose">00:00 – 08:29</span> (PvP/Bot): Khóa toàn bộ <strong>7 Di tích Cấp 2–3</strong> và 6 Cảng chỉ bán <strong>Key 1</strong>.</li>
-                            <li>Đúng <span class="hl-mint">08:30</span>: Mở khóa toàn bộ 7 Di tích Cấp 2–3 và mở bán đầy đủ Key 1/2/3!</li>
+                        <ul class="rule-formula-list">
+                            <li>🗝️ <strong>Giới hạn Key:</strong> Tối đa <span class="hl-gold">1 Key/cấp</span> (<span class="hl-mint">0 ô kho</span>); trước <span class="hl-sky">08:30</span> chỉ bán Key 1.</li>
+                            <li>🔒 <strong>Khóa tự động:</strong> Chinh phục hết Di tích cấp nào → Key cấp đó <strong>khóa mua ngay</strong> tại mọi cảng.</li>
+                            <li>📦 <strong>Nâng kho vĩnh viễn:</strong> Ăn <strong>Di tích đầu tiên</strong> (mọi cấp) nâng ngay kho <span class="hl-mint">12 → 16 ô</span>!</li>
                         </ul>
                     </div>
+                `
+            },
+            {
+                tabId: "monuments_quests",
+                keywords: "nhiem vu chung bi mat chuoi thong thai 5/5 +1 ap 6 ap",
+                html: `
                     <div class="rule-visual-card">
-                        <div class="rule-card-head">
-                            <span class="rule-card-icon">🏛️</span>
-                            <h4>9 Di Tích (Tỷ Lệ 2 – 4 – 3) &amp; Bẫy</h4>
-                        </div>
-                        <ul class="rule-visual-list">
-                            <li><strong>2 Di tích Cấp 1 (tối đa 1 lần):</strong> Phí <code>1 Key 1 + 1 Lúa + 2 Xu</code> → Thưởng <span class="hl-gold">+1 ⭐</span>, <span class="hl-gold">+4 Xu</span> &amp; tặng <strong>1 Key 2</strong> (đã có → +3 Xu). <em>(Chinh phục bất kỳ Di tích đầu tiên nào ở mọi cấp đều nâng kho vĩnh viễn 12→16 ô!)</em> Sai: <span class="hl-rose">-1 HP</span>.</li>
-                            <li><strong>4 Di tích Cấp 2:</strong> Phí <code>1 Key 2 + 2 Lúa + 3 Xu</code> → Thưởng <span class="hl-gold">+3 ⭐</span> &amp; +4 Xu. Sai: <span class="hl-rose">-2 HP</span>.</li>
-                            <li><strong>3 Di tích Cấp 3 (khóa sau khi giải):</strong> Phí <code>1 Key 3 + 3 Lúa + 1 Sắt + 6 Xu</code> → Thưởng <span class="hl-gold">+5 ⭐</span> &amp; +5 Xu. Sai: <span class="hl-rose">-3 HP</span> &amp; đẩy lùi.</li>
-                        </ul>
-                    </div>
-                    <div class="rule-visual-card full-span">
                         <div class="rule-card-head">
                             <span class="rule-card-icon">📋</span>
-                            <h4>Nhiệm Vụ Chung (Công Khai) &amp; Nhiệm Vụ Bí Mật (Giấu Điểm)</h4>
+                            <h4>Nhiệm Vụ &amp; Chuỗi Thông Thái</h4>
                         </div>
-                        <ul class="rule-visual-list">
-                            <li><strong>🌐 3 Nhiệm Vụ Chung:</strong> Ai đậu đúng Cảng và đủ hàng nộp trước sẽ nhận <span class="hl-gold">+2 đến +3 ⭐ Công khai</span> + Xu và rút đơn mới.</li>
-                            <li><strong>🕵️ 2 Nhiệm Vụ Bí Mật:</strong> Tiến độ tự đếm; nhận thưởng <span class="hl-sky">+2 ⭐ Điểm Ẩn</span> (chỉ hiện trên HUD cá nhân, giấu khỏi Bảng Xếp Hạng chung cho tới khi chốt thắng 15 điểm hoặc hết 45:00!).</li>
+                        <ul class="rule-formula-list">
+                            <li>📋 <strong>Nhiệm Vụ Chung:</strong> <span class="hl-gold">3 đơn công khai</span> — trả tại cảng lấy <span class="hl-gold">+2~3 ⭐</span> &amp; Xu.</li>
+                            <li>🕵️ <strong>Nhiệm Vụ Bí Mật:</strong> <span class="hl-sky">2 thẻ giấu điểm</span> — chỉ lật bài cộng điểm khi chốt thắng / hết 45:00.</li>
+                            <li>🔥 <strong>Chuỗi Thông Thái 5/5:</strong> Đúng 5 Quiz liên tiếp → tặng <span class="hl-mint">+1 AP miễn phí</span> (6 AP) lượt sau!</li>
                         </ul>
                     </div>
-                </div>
-            `,
-            weather_events: `
-                <div class="rule-visual-cards-grid">
-                    <div class="rule-visual-card">
-                        <div class="rule-card-head">
-                            <span class="rule-card-icon">☀️</span>
-                            <h4>00:00–20:00 • Nắng &amp; Mưa Nhiệt Đới</h4>
-                        </div>
-                        <ul class="rule-visual-list">
-                            <li><strong>00:00 – 15:00 (☀️ Nắng Biển Đông):</strong> Biển êm, tầm nhìn xa, di chuyển chuẩn <span class="hl-sky">1 AP = 2 ô</span>.</li>
-                            <li><strong>15:00 – 20:00 (🌧️ Mưa Nhiệt Đới):</strong> Mưa rào cảnh báo trước cơn Giông Bão sắp đổ bộ.</li>
-                        </ul>
+                `
+            },
+            // TAB 5
+            {
+                tabId: "weather_events",
+                keywords: "thoi tiet 6 pha nang mua giong bao hoang hon dem sao sieu bao yagi",
+                html: `
+                    <div class="rule-weather-timeline">
+                        <div class="rule-wphase-node"><span class="rw-ic">☀️</span><strong>Nắng</strong><small>00–15p</small></div>
+                        <div class="rule-wphase-node"><span class="rw-ic">🌧️</span><strong>Mưa</strong><small>15–20p</small></div>
+                        <div class="rule-wphase-node is-storm"><span class="rw-ic">⛈️</span><strong>Giông Bão</strong><small>20–27p</small></div>
+                        <div class="rule-wphase-node"><span class="rw-ic">🌅</span><strong>Hoàng Hôn</strong><small>27–29p</small></div>
+                        <div class="rule-wphase-node"><span class="rw-ic">🌌</span><strong>Đêm Sao</strong><small>29–34p</small></div>
+                        <div class="rule-wphase-node is-yagi"><span class="rw-ic">🌀</span><strong>Bão Yagi</strong><small>34–45p</small></div>
                     </div>
-                    <div class="rule-visual-card">
+                `
+            },
+            {
+                tabId: "weather_events",
+                keywords: "giong bao phong toa 6 mo lua go sat doc hieu 1 phut 30 giay set danh",
+                html: `
+                    <div class="rule-visual-card alert-storm">
                         <div class="rule-card-head">
                             <span class="rule-card-icon">⛈️</span>
-                            <h4>20:00–27:00 • Giông Bão (7 Phút)</h4>
+                            <h4>Cảnh Báo: Giông Bão (20:00–27:00)</h4>
                         </div>
-                        <ul class="rule-visual-list">
-                            <li>Cả phòng đọc chung 1 bài Địa lý &amp; trả lời câu hỏi riêng trong <span class="hl-rose">01:30</span> (sai/hết giờ bị Sét đánh <span class="hl-rose">-2 HP</span>).</li>
-                            <li><strong>4 ô tài nguyên bị phong tỏa</strong> (⛔ không thể vào khai thác).</li>
+                        <ul class="rule-formula-list">
+                            <li>⛔ <strong>Phong tỏa công bằng 6 mỏ:</strong> Khóa đều <span class="hl-gold">2 Lúa – 2 Gỗ – 2 Sắt</span> (vẫn chừa mỏ mở; đi ngang được).</li>
+                            <li>📖 <strong>Đọc Hiểu Địa Lý chung:</strong> Cả phòng đọc chung 1 bài (<span class="hl-rose">01:30</span>), sai/hết giờ mất <span class="hl-rose">-2 ❤️ HP</span>.</li>
                         </ul>
                     </div>
-                    <div class="rule-visual-card">
-                        <div class="rule-card-head">
-                            <span class="rule-card-icon">🌌</span>
-                            <h4>27:00–34:00 • Hoàng Hôn &amp; Đêm Sao</h4>
-                        </div>
-                        <ul class="rule-visual-list">
-                            <li><strong>27:00 – 29:00 (🌅 Hoàng Hôn)</strong> &amp; <strong>29:00 – 34:00 (🌌 Đêm Sao)</strong>: Biển lặng sau bão.</li>
-                            <li>Toàn bộ ô khai thác tài nguyên được <span class="hl-mint">giảm 1 vòng hồi phục</span>!</li>
-                        </ul>
-                    </div>
-                    <div class="rule-visual-card">
+                `
+            },
+            {
+                tabId: "weather_events",
+                keywords: "sieu bao yagi 1 ap 1 o 4 ap cau hoi bao set danh luy tien -1 -2 -3 hp",
+                html: `
+                    <div class="rule-visual-card alert-yagi">
                         <div class="rule-card-head">
                             <span class="rule-card-icon">🌀</span>
-                            <h4>34:00–45:00 • Siêu Bão Yagi (Báo Động Đỏ)</h4>
+                            <h4>Báo Động Đỏ: Siêu Bão Yagi (34:00–45:00)</h4>
                         </div>
-                        <ul class="rule-visual-list">
-                            <li>Sóng dữ: <span class="hl-rose">1 AP = 1 ô nước</span> (tối đa 3 ô/lượt). Khai thác sai bị Sét đánh <span class="hl-rose">-1 HP</span>.</li>
-                            <li>Dùng hết <strong>4 AP</strong> xuất hiện Câu Hỏi Tâm Bão: Đúng <span class="hl-gold">+1 Xu</span> / Sai Sét đánh lũy tiến <span class="hl-rose">-1 → -2 → -3 HP</span>!</li>
+                        <ul class="rule-formula-list">
+                            <li>🌊 <strong>Sóng dữ cực chậm:</strong> <span class="hl-rose">1 AP = 1 ô</span> (max 3 ô/lượt); đào mỏ sai bị Sét đánh <span class="hl-rose">-1 ❤️ HP</span>.</li>
+                            <li>⚡ <strong>Câu Hỏi Tâm Bão (hết 4 AP):</strong> Đúng <span class="hl-gold">+1 💰</span> • Sai bị Sét đánh lũy tiến <span class="hl-rose">-1 → -2 → -3 ❤️ HP</span>!</li>
                         </ul>
                     </div>
-                </div>
+                `
+            },
+            {
+                tabId: "weather_events",
+                keywords: "tau fdi thuong doan quoc te 2 3 xu quiz thu gon dong ho dem nguoc",
+                html: `
+                    <div class="rule-visual-card full-span">
+                        <div class="rule-card-head">
+                            <span class="rule-card-icon">🚢</span>
+                            <h4>Thương Đoàn Quốc Tế (Tàu FDI) &amp; Quiz Thu Gọn</h4>
+                        </div>
+                        <ul class="rule-formula-list">
+                            <li>🚢 <strong>Tàu FDI:</strong> Xuất hiện trên biển mỗi 4–5 vòng — trả lời đúng khảo sát nhận ngay <span class="hl-gold">+2 đến +3 💰</span>!</li>
+                            <li>⏱️ <strong>Quiz Thu Gọn:</strong> Mọi câu hỏi đều có đồng hồ đếm ngược &amp; nút <strong>Thu gọn</strong> để soi bản đồ rồi bấm mở lại.</li>
+                        </ul>
+                    </div>
+                `
+            }
+        ];
+
+        const tabAccordions = {
+            overview: `
+                <details class="rule-accordion">
+                    <summary>💡 Mẹo cho ván đầu tiên</summary>
+                    <div class="rule-accordion-body">
+                        <div>• <strong>Ưu tiên mở Di tích đầu tiên:</strong> Chinh phục bất kỳ Di tích nào sẽ lập tức nâng kho vĩnh viễn <span class="hl-mint">12 → 16 ô</span> giúp ôm hàng cực khỏe.</div>
+                        <div>• <strong>Tận dụng Chợ P2P (0% thuế, 0 AP):</strong> Đổi hàng với đối thủ ngay cả khi chưa tới lượt mình để gom đủ nguyên liệu mở Di tích!</div>
+                    </div>
+                </details>
+            `,
+            movement_reef: `
+                <details class="rule-accordion">
+                    <summary>💡 Mẹo lái tàu &amp; quan sát bản đồ chuẩn</summary>
+                    <div class="rule-accordion-body">
+                        <div>• <strong>Chế độ nhãn Vùng &amp; Bão:</strong> Khi vào pha Giông Bão, bấm <span class="rule-kbd">L</span> chuyển sang <em>Vùng &amp; Bão</em> để thấy rõ 6 mỏ bị phong tỏa.</div>
+                        <div>• <strong>Vẽ đường né Đá Ngầm:</strong> Giữ chuột trái kéo từng ô nước quanh đá ngầm thay vì bấm thẳng 1 phát vào đích!</div>
+                    </div>
+                </details>
+            `,
+            port_market: `
+                <details class="rule-accordion">
+                    <summary>💡 Chi tiết 6 Vùng Kinh Tế &amp; Thương Quyền 5+1</summary>
+                    <div class="rule-accordion-body">
+                        <div>• <strong>Thương Quyền 5+1:</strong> Đầu trận chia ngẫu nhiên 5 vùng (Cái Lân, Hải Phòng, Tiên Sa, Quy Nhơn, Cần Thơ) cho 5 tàu; riêng <strong>Đông Nam Bộ (Cái Mép)</strong> luôn là <span class="hl-mint">Vùng Tự Do (Thuế 0 Xu)</span>.</div>
+                        <div>• <strong>Lãi buôn Đặc sản xuyên Việt:</strong> Mua <span class="hl-gold">2 💰</span> → cách 1 vùng bán <span class="hl-mint">3 💰 (+1)</span> • cách 2 vùng <span class="hl-mint">5 💰 (+3)</span> • ≥ 3 vùng <span class="hl-mint">7 💰 (+5)</span>!</div>
+                        <div>• <strong>Khai thác Mỏ (1 AP):</strong> Đúng <span class="hl-mint">+2 tài nguyên</span> / Sai <span class="hl-gold">+1 tài nguyên</span> (hồi: Lúa 2v, Gỗ 3v, Sắt 4v).</div>
+                    </div>
+                </details>
+            `,
+            monuments_quests: `
+                <details class="rule-accordion">
+                    <summary>💡 Mẹo tối ưu Di Tích &amp; Giấu Điểm Bí Mật</summary>
+                    <div class="rule-accordion-body">
+                        <div>• <strong>Tầm nhìn Key:</strong> Bạn chỉ soi được kho Key của <em>Cảng đang đậu</em> và <em>Cảng Thương Quyền nhà</em> — hãy ghé sớm sau mốc <span class="hl-sky">08:30</span>.</div>
+                        <div>• <strong>Cú lật kèo cuối trận:</strong> 2 thẻ Nhiệm Vụ Bí Mật cộng tới <span class="hl-gold">+4 ⭐</span> ẩn — giữ kín tới phút 45:00 để bứt top bất ngờ!</div>
+                    </div>
+                </details>
+            `,
+            weather_events: `
+                <details class="rule-accordion">
+                    <summary>💡 Mẹo tận dụng Hoàng Hôn / Đêm Sao &amp; vượt Bão Yagi</summary>
+                    <div class="rule-accordion-body">
+                        <div>• <strong>Giờ vàng hồi mỏ (27:00–34:00):</strong> Trong pha Hoàng Hôn &amp; Đêm Sao, mọi mỏ tài nguyên được <span class="hl-mint">giảm 1 vòng hồi phục</span>.</div>
+                        <div>• <strong>Sống sót qua Bão Yagi:</strong> Giữ sẵn <strong>🛡️ Bảo Hiểm Hàng Hải</strong> hoặc dừng ở 3 AP khi máu yếu để tránh kích hoạt Câu Hỏi Tâm Bão ở mốc 4 AP!</div>
+                    </div>
+                </details>
             `
         };
 
+        return { tabs, searchableCards, tabAccordions };
+    }
+
+    renderRulebookBodyHtml(activeTab, searchQuery = "") {
+        const { tabs, searchableCards, tabAccordions } = this.getRulebookCatalog();
+        const normQ = this.normalizeRuleSearch(searchQuery);
+
+        if (normQ) {
+            const matched = searchableCards.filter(c => {
+                const hay = this.normalizeRuleSearch(`${c.keywords} ${c.html.replace(/<[^>]+>/g, " ")}`);
+                return hay.includes(normQ);
+            });
+            if (matched.length === 0) {
+                return `
+                    <div class="rule-visual-card" style="text-align:center; padding:24px 16px; margin-bottom:12px">
+                        <div style="font-size:24px; margin-bottom:6px">🔍</div>
+                        <div style="font-weight:800; color:#fde68a">Không tìm thấy quy tắc khớp với "${searchQuery.replace(/[<>&"]/g, "")}"</div>
+                        <div style="font-size:12px; color:#9cc4d4; margin-top:4px">Thử các từ khóa như: <strong>Yagi, Key, AFK, Thuế, P2P, Đá ngầm, 15, Bảo hiểm</strong></div>
+                    </div>
+                `;
+            }
+            const tabMap = new Map(tabs.map(t => [t.id, t.label]));
+            return `
+                <div style="font-size:12px; font-weight:800; color:#123142; margin-bottom:8px">
+                    🔎 Tìm thấy <strong>${matched.length}</strong> mục luật khớp trên cả 5 tab:
+                </div>
+                <div class="rule-visual-cards-grid single-wide">
+                    ${matched.map(c => `
+                        <div>
+                            <div style="display:flex; justify-content:flex-end; margin-bottom:4px">
+                                <span class="rule-search-tag" style="background:#123142; color:#fde68a; border-color:#b58b42">${tabMap.get(c.tabId) || ""}</span>
+                            </div>
+                            ${c.html}
+                        </div>
+                    `).join("")}
+                </div>
+            `;
+        }
+
+        const tabCards = searchableCards.filter(c => c.tabId === activeTab);
+        if (activeTab === "overview" || activeTab === "port_market") {
+            return `${tabCards.map(c => c.html).join("")}${tabAccordions[activeTab] || ""}`;
+        }
+        if (activeTab === "monuments_quests") {
+            const [tierBlock, ...rest] = tabCards;
+            return `
+                ${tierBlock ? tierBlock.html : ""}
+                <div class="rule-visual-cards-grid">${rest.map(c => c.html).join("")}</div>
+                ${tabAccordions[activeTab] || ""}
+            `;
+        }
+        if (activeTab === "weather_events") {
+            const [timelineBlock, ...rest] = tabCards;
+            return `
+                ${timelineBlock ? timelineBlock.html : ""}
+                <div class="rule-visual-cards-grid">${rest.map(c => c.html).join("")}</div>
+                ${tabAccordions[activeTab] || ""}
+            `;
+        }
+        return `
+            <div class="rule-visual-cards-grid">${tabCards.map(c => c.html).join("")}</div>
+            ${tabAccordions[activeTab] || ""}
+        `;
+    }
+
+    filterRulebookSearch(val) {
+        this.rulebookSearchQuery = String(val || "");
+        const bodyEl = document.getElementById("rulebook-dynamic-body");
+        const clearBtn = document.getElementById("rulebook-search-clear");
+        if (clearBtn) clearBtn.classList.toggle("hidden", !this.rulebookSearchQuery.trim());
+        if (bodyEl) {
+            bodyEl.innerHTML = this.renderRulebookBodyHtml(this.selectedRuleCategory || "overview", this.rulebookSearchQuery);
+        }
+    }
+
+    clearRulebookSearch() {
+        const inp = document.getElementById("rulebook-search-input");
+        if (inp) {
+            inp.value = "";
+            inp.focus();
+        }
+        this.filterRulebookSearch("");
+    }
+
+    openRulebookModal(category = "overview") {
+        const aliasMap = { storage_keys: "port_market", monuments_traps: "monuments_quests" };
+        const { tabs } = this.getRulebookCatalog();
+        const activeTab = aliasMap[category] || (category || "overview");
+        this.selectedRuleCategory = activeTab;
+        this.rulebookSearchQuery = "";
+
+        const curIdx = Math.max(0, tabs.findIndex(t => t.id === activeTab));
+        const prevTab = curIdx > 0 ? tabs[curIdx - 1] : null;
+        const nextTab = curIdx < tabs.length - 1 ? tabs[curIdx + 1] : null;
+
         const html = `
             <div class="modal-sticky-top">
-                <div class="modal-sticky-head-row">
+                <div class="rule-header-bar">
                     <div>
-                        <div class="modal-header-badge" style="background:#0f2942; border-color:#e6b84a; color:#fde68a; margin-bottom:4px">
-                            <span>📜 LUẬT CHƠI CHÍNH THỨC — HÀNH TRÌNH VÀNG SON V3</span>
+                        <div class="modal-header-badge" style="background:#123142; border-color:#e6b84a; color:#fde68a; margin-bottom:2px">
+                            <span>📜 CẨM NANG HẢI TRÌNH — ĐỌC 30 GIÂY CHƠI NGAY</span>
                         </div>
-                        <h2 class="modal-title" style="margin:2px 0 0 0; font-size:19px">Quy Tắc Chiến Thuật 6 Vùng Kinh Tế Việt Nam</h2>
+                    </div>
+                    <div class="rule-search-wrap">
+                        <input type="text" id="rulebook-search-input" class="rule-search-input"
+                               placeholder="🔍 Tìm nhanh: Yagi, Key, AFK, Thuế..."
+                               oninput="window.GAME && window.GAME.filterRulebookSearch(this.value)" />
+                        <button type="button" id="rulebook-search-clear" class="rule-search-clear hidden"
+                                title="Xóa tìm kiếm" onclick="window.GAME && window.GAME.clearRulebookSearch()">✕</button>
                     </div>
                 </div>
                 <div class="rule-cat-tabs">
-                    ${tabs.map(t => `
+                    ${tabs.map((t, i) => `
                         <button class="rule-cat-tab ${activeTab === t.id ? 'active' : ''}"
                                 onclick="window.GAME.openRulebookModal('${t.id}')">
-                            ${t.label}
+                            ${i + 1}. ${t.label}
                         </button>
                     `).join("")}
                 </div>
             </div>
 
-            ${sectionContent[activeTab] || sectionContent.overview}
+            <div id="rulebook-dynamic-body">
+                ${this.renderRulebookBodyHtml(activeTab, "")}
+            </div>
 
-            <div class="modal-actions" style="justify-content:flex-end">
-                <button class="btn-primary-gold" onclick="window.GAME.closeModal()">Đã Hiểu Luật Chơi</button>
+            <div class="rule-footer-nav">
+                <div class="rule-nav-left-right">
+                    <button type="button" class="btn-secondary" ${prevTab ? '' : 'disabled'}
+                            onclick="${prevTab ? `window.GAME.openRulebookModal('${prevTab.id}')` : ''}">
+                        ← Trước
+                    </button>
+                    <div class="rule-progress-dots" title="Trang ${curIdx + 1}/${tabs.length}">
+                        ${tabs.map((t, i) => `<span class="rule-pdot ${i === curIdx ? 'active' : ''}" onclick="window.GAME.openRulebookModal('${t.id}')" title="${t.label}"></span>`).join("")}
+                        <span style="margin-left:4px">${curIdx + 1}/${tabs.length}</span>
+                    </div>
+                </div>
+                <div class="rule-nav-left-right">
+                    ${nextTab ? `
+                        <button type="button" class="btn-secondary" onclick="window.GAME.openRulebookModal('${nextTab.id}')">
+                            Tiếp theo: ${nextTab.shortLabel} →
+                        </button>
+                    ` : ''}
+                    <button type="button" class="btn-primary-gold" onclick="window.GAME.closeModal()">
+                        ⚓ Đã Hiểu — Ra Khơi!
+                    </button>
+                </div>
             </div>
         `;
         this.showModal(html);
+
+        const searchInp = document.getElementById("rulebook-search-input");
+        if (searchInp) {
+            searchInp.addEventListener("keydown", (e) => {
+                if (e.key === "Escape") {
+                    e.preventDefault();
+                    if (searchInp.value) {
+                        this.clearRulebookSearch();
+                    } else {
+                        this.closeModal();
+                    }
+                }
+            });
+        }
     }
 
     // ------------------------------------------------------------------------
     // MODAL SYSTEM WITH TOP-RIGHT CLOSE BUTTON ON EVERY WINDOW
     // ------------------------------------------------------------------------
     showModal(innerHTML) {
+        this.cancelLockedMovePath(false);
         clearInterval(this.quizAutoCloseInterval);
         const overlay = document.getElementById("modal-overlay");
         const content = document.getElementById("modal-content");
@@ -7147,6 +9855,10 @@ class GoldenJourneyGame {
         this.sandboxTeleport = false;
         const sbBtn = document.getElementById("btn-toggle-sandbox");
         if (sbBtn) sbBtn.classList.add("hidden");
+        const sbExitBtn = document.getElementById("btn-sandbox-exit");
+        if (sbExitBtn) sbExitBtn.classList.add("hidden");
+        const openRoomBtn = document.getElementById("btn-open-room");
+        if (openRoomBtn) openRoomBtn.classList.remove("hidden");
         const sbPanel = document.getElementById("sandbox-creative-panel");
         if (sbPanel) sbPanel.classList.add("hidden");
     }
@@ -7156,6 +9868,10 @@ class GoldenJourneyGame {
         this.sandboxInfiniteMove = true;
         const sbBtn = document.getElementById("btn-toggle-sandbox");
         if (sbBtn) sbBtn.classList.remove("hidden");
+        const sbExitBtn = document.getElementById("btn-sandbox-exit");
+        if (sbExitBtn) sbExitBtn.classList.remove("hidden");
+        const openRoomBtn = document.getElementById("btn-open-room");
+        if (openRoomBtn) openRoomBtn.classList.add("hidden");
         const infBtn = document.getElementById("btn-sb-inf-move") || document.getElementById("sb-btn-inf-move");
         if (infBtn) {
             infBtn.classList.add("active");
@@ -7312,6 +10028,29 @@ class GoldenJourneyGame {
         this.syncMultiplayerGameState();
     }
 
+    sandboxToggleStormBlockade() {
+        if (!this.sandboxMode) return;
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+        if (Array.isArray(this.blockedMineIds) && this.blockedMineIds.length > 0) {
+            this.applyWeatherPhase("sunny", true);
+        } else {
+            this.applyWeatherPhase("thunderstorm", true);
+        }
+        this.updateUI();
+    }
+
+    sandboxFastForwardToFinal10s() {
+        if (!this.sandboxMode) return;
+        window.SFX && window.SFX.playClick && window.SFX.playClick();
+        this.victoryShownForMatch = false;
+        this.matchWinner = null;
+        this.finalFiveMinNotified = false;
+        this.sandboxAllowTimeout = true;
+        this.matchElapsedSec = 2690; // 44:50 -> còn 00:10 cuối trận!
+        this.updateClockAndTickerUI();
+        this.showToast("⏱️ [Sáng Tạo] Đã tua đồng hồ về 00:10 cuối trận — chuẩn bị test hết giờ, Lật Bài Bí Mật & Phản Tư!");
+    }
+
     sandboxAdjustRelic(delta) {
         if (!this.sandboxMode) return;
         window.SFX.playRelicFanfare();
@@ -7336,8 +10075,11 @@ class GoldenJourneyGame {
         this.world.hexTiles.forEach(t => {
             t.resourceCooldown = 0;
             t.monumentLocked = false;
+            t.monumentConqueror = null;
         });
+        this.exhaustedTiersNotified = new Set();
         this.world.updateResourceVisuals();
+        this.syncMonumentVisuals3D();
         const p = this.getLocalPlayer() || this.getActivePlayer();
         if (p) {
             p.tier1Visited = 0;
@@ -7448,6 +10190,106 @@ class GoldenJourneyGame {
     bindUIEvents() {
         this.initDraggableWindows();
 
+        // Mục 4D: Theo dõi tương tác UI / bản đồ của người chơi:
+        // - Khi bảng "Máy đang tự động" đang mở (afkAutoNoticeShown) hoặc đang bị Tàu Máy lái thay -> chỉ tắt & lấy lại quyền lái khi bấm/chạm vào màn hình!
+        // - Khi đang trong lượt tự lái -> reset bộ đếm AFK 50s (KHÔNG reset bộ đếm lastGameplayActionAt của đồng hồ 45:00!)
+        if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+            const onScreenTapOrClick = () => {
+                if (!this.isGameStarted || this.sandboxMode || this.matchWinner) return;
+                const localP = this.getLocalPlayer();
+                if (this.afkAutoNoticeShown || (localP && localP.afkBotTakeover && !localP.eliminated)) {
+                    // Tránh tắt bảng ngay tức thì do chính thao tác sát mốc bật AFK
+                    if (this.afkAutoNoticeShown && (Date.now() - (this.afkAutoNoticeShownAt || 0)) < 200) {
+                        return;
+                    }
+                    this.reclaimControlFromAFKBot();
+                    return;
+                }
+                if (this.isMyTurn()) {
+                    this.recordPlayerInteraction();
+                }
+            };
+            const onLocalKeyDown = (e) => {
+                if (!this.isGameStarted || this.sandboxMode || this.matchWinner) return;
+                if (e && e.repeat) return;
+                const ignoredKeys = new Set(["Shift", "Control", "Alt", "Meta", "CapsLock", "NumLock", "ScrollLock"]);
+                if (e && ignoredKeys.has(e.key)) return;
+                const localP = this.getLocalPlayer();
+                if (this.afkAutoNoticeShown || (localP && localP.afkBotTakeover && !localP.eliminated)) {
+                    if (this.afkAutoNoticeShown && (Date.now() - (this.afkAutoNoticeShownAt || 0)) < 200) {
+                        return;
+                    }
+                    this.reclaimControlFromAFKBot();
+                    return;
+                }
+                if (this.isMyTurn()) {
+                    this.recordPlayerInteraction();
+                }
+            };
+            document.addEventListener("pointerdown", onScreenTapOrClick, { passive: true });
+            document.addEventListener("touchstart", onScreenTapOrClick, { passive: true });
+            document.addEventListener("keydown", onLocalKeyDown, { passive: true });
+        }
+
+        const inmatchChatInp = document.getElementById("inmatch-chat-input");
+        if (inmatchChatInp) {
+            inmatchChatInp.addEventListener("keydown", (e) => {
+                if (this.isMyTurn()) this.recordPlayerInteraction();
+                if (e.key === "Enter") {
+                    e.preventDefault();
+                    this.submitInMatchChat();
+                } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    this.closeInMatchChatBox();
+                }
+            });
+        }
+        const mmNameInp = document.getElementById("mm-captain-name-input");
+        if (mmNameInp) {
+            mmNameInp.addEventListener("keydown", (e) => {
+                if (e.key === "Enter") {
+                    e.preventDefault();
+                    this.saveMainMenuNameEdit();
+                } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    const disp = document.getElementById("mm-name-display-row");
+                    const edit = document.getElementById("mm-name-edit-row");
+                    if (edit) edit.classList.add("hidden");
+                    if (disp) disp.classList.remove("hidden");
+                }
+            });
+        }
+        if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+            document.addEventListener("click", (e) => {
+                const pop = document.getElementById("mm-settings-popover");
+                const btn = document.getElementById("btn-mm-settings");
+                if (pop && !pop.classList.contains("hidden") && !pop.contains(e.target) && (!btn || !btn.contains(e.target))) {
+                    pop.classList.add("hidden");
+                }
+                ["inmatch", "lobby"].forEach(scope => {
+                    const qPop = document.getElementById(`${scope}-quick-popover`);
+                    const qBtn = document.getElementById(`btn-${scope}-quick-toggle`);
+                    if (qPop && !qPop.classList.contains("hidden") && !qPop.contains(e.target) && (!qBtn || !qBtn.contains(e.target))) {
+                        qPop.classList.add("hidden");
+                        if (qBtn) qBtn.classList.remove("is-open");
+                    }
+                });
+            });
+            document.addEventListener("keydown", (e) => {
+                if ((e.key === "Escape" || e.code === "Escape") && this.isAtlasLightboxOpen()) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    this.closeAtlasLightbox();
+                    return;
+                }
+            }, true);
+            document.addEventListener("keydown", (e) => {
+                if (e.key === "Escape" || e.code === "Escape") {
+                    this.closeAllQuickChatPopovers();
+                }
+            });
+        }
+
         document.getElementById("btn-context-action").addEventListener("click", () => {
             window.SFX.playClick();
             this.triggerContextualActionOnCurrentHex();
@@ -7498,13 +10340,28 @@ class GoldenJourneyGame {
         });
         document.getElementById("btn-open-room").addEventListener("click", () => {
             window.SFX.playClick();
-            this.showWaitingScreen();
+            this.openInMatchLobbyOverlay();
         });
         const roomPill = document.getElementById("room-code-pill");
         if (roomPill) {
             roomPill.addEventListener("click", () => {
                 window.SFX.playClick();
-                this.showWaitingScreen();
+                this.openInMatchLobbyOverlay();
+            });
+        }
+        const waitOverlay = document.getElementById("waiting-screen-overlay");
+        if (waitOverlay) {
+            waitOverlay.addEventListener("click", (e) => {
+                if (e.target === waitOverlay && this.isInMatchLobbyOverlayOpen) {
+                    this.closeInMatchLobbyOverlay();
+                }
+            });
+        }
+        if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+            document.addEventListener("keydown", (e) => {
+                if ((e.key === "Escape" || e.code === "Escape") && this.isInMatchLobbyOverlayOpen) {
+                    this.closeInMatchLobbyOverlay();
+                }
             });
         }
         const camLockBtn = document.getElementById("btn-camera-lock");

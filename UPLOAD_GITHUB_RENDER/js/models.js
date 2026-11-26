@@ -12,6 +12,20 @@
 // ============================================================================
 
 class ProceduralModels {
+    // Configure sharp Anisotropic + Trilinear Mipmap filtering on CanvasTextures (anti-blur on zoom out)
+    static configureSharpCanvasTexture(texture, isHorizontalSurface = false) {
+        if (!texture) return texture;
+        const maxAniso = Math.max(1, ProceduralModels.MAX_ANISOTROPY || 4);
+        texture.anisotropy = isHorizontalSurface ? Math.min(maxAniso, 8) : Math.min(maxAniso, 4);
+        if (typeof THREE !== "undefined") {
+            if (THREE.LinearMipmapLinearFilter !== undefined) texture.minFilter = THREE.LinearMipmapLinearFilter;
+            if (THREE.LinearFilter !== undefined) texture.magFilter = THREE.LinearFilter;
+        }
+        texture.generateMipmaps = true;
+        texture.needsUpdate = true;
+        return texture;
+    }
+
     // Deterministic pseudo-random helper from integer seed
     static seededRandom(seed) {
         const x = Math.sin(seed * 12.9898 + 78.233) * 43758.5453;
@@ -242,8 +256,7 @@ class ProceduralModels {
             ctx.fillText(subtext, 310, 137);
         }
 
-        const texture = new THREE.CanvasTexture(canvas);
-        texture.needsUpdate = true;
+        const texture = ProceduralModels.configureSharpCanvasTexture(new THREE.CanvasTexture(canvas), false);
         const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
         const sprite = new THREE.Sprite(spriteMat);
         sprite.scale.set(scaleX, scaleY, 1);
@@ -316,17 +329,20 @@ class ProceduralModels {
         ctx.strokeStyle = isLocalPlayer ? "#fde047" : "#ffffff";
         ctx.stroke();
 
-        // Player Name ONLY — Bold, Huge, Crystal Clear
-        ctx.fillStyle = isLocalPlayer ? "#fef08a" : "#ffffff";
+        // Player Name ONLY — Bold, Huge, Crystal Clear (with dark strokeText for far-zoom sharpness)
         ctx.font = "900 42px 'Segoe UI', Roboto, sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
+        ctx.lineJoin = "round";
         ctx.shadowColor = "rgba(0, 0, 0, 0.92)";
         ctx.shadowBlur = 6;
+        ctx.lineWidth = 6;
+        ctx.strokeStyle = "rgba(2, 6, 23, 0.96)";
+        ctx.strokeText(cleanName, 298, pillY + pillH / 2 + 2);
+        ctx.fillStyle = isLocalPlayer ? "#fef08a" : "#ffffff";
         ctx.fillText(cleanName, 298, pillY + pillH / 2 + 2);
 
-        const texture = new THREE.CanvasTexture(canvas);
-        texture.needsUpdate = true;
+        const texture = ProceduralModels.configureSharpCanvasTexture(new THREE.CanvasTexture(canvas), false);
         const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
         const sprite = new THREE.Sprite(spriteMat);
         sprite.scale.set(isLocalPlayer ? 3.55 : 3.25, isLocalPlayer ? 1.02 : 0.92, 1);
@@ -392,7 +408,7 @@ class ProceduralModels {
         ctx.textBaseline = "middle";
         ctx.fillText("▼ THUYỀN CỦA BẠN", 210, 53);
 
-        const tex = new THREE.CanvasTexture(canvas);
+        const tex = ProceduralModels.configureSharpCanvasTexture(new THREE.CanvasTexture(canvas), false);
         const badgeSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
         badgeSprite.scale.set(2.45, 0.62, 1);
         badgeSprite.position.set(0, 1.34, 0);
@@ -444,28 +460,27 @@ class ProceduralModels {
 
         if (t2) {
             ctx.font = "800 50px 'Be Vietnam Pro', 'Segoe UI', Arial, sans-serif";
-            ctx.lineWidth = 7;
-            ctx.strokeStyle = "rgba(2, 6, 23, 0.95)";
+            ctx.lineWidth = 8.5;
+            ctx.strokeStyle = "rgba(2, 6, 23, 0.97)";
             ctx.strokeText(t1, 512, 92);
             ctx.fillStyle = "#ffffff";
             ctx.fillText(t1, 512, 92);
 
             ctx.font = "800 44px 'Be Vietnam Pro', 'Segoe UI', Arial, sans-serif";
-            ctx.lineWidth = 6;
+            ctx.lineWidth = 7.2;
             ctx.strokeText(t2, 512, 162);
             ctx.fillStyle = "#fde047";
             ctx.fillText(t2, 512, 162);
         } else {
             ctx.font = "800 56px 'Be Vietnam Pro', 'Segoe UI', Arial, sans-serif";
-            ctx.lineWidth = 7;
-            ctx.strokeStyle = "rgba(2, 6, 23, 0.95)";
+            ctx.lineWidth = 8.5;
+            ctx.strokeStyle = "rgba(2, 6, 23, 0.97)";
             ctx.strokeText(t1, 512, 128);
             ctx.fillStyle = "#ffffff";
             ctx.fillText(t1, 512, 128);
         }
 
-        const texture = new THREE.CanvasTexture(canvas);
-        texture.needsUpdate = true;
+        const texture = ProceduralModels.configureSharpCanvasTexture(new THREE.CanvasTexture(canvas), false);
         const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
         const sprite = new THREE.Sprite(spriteMat);
         sprite.scale.set(scaleX, scaleY, 1);
@@ -503,8 +518,7 @@ class ProceduralModels {
         ctx.textBaseline = "middle";
         ctx.fillText(icon, 80, 84);
 
-        const texture = new THREE.CanvasTexture(canvas);
-        texture.needsUpdate = true;
+        const texture = ProceduralModels.configureSharpCanvasTexture(new THREE.CanvasTexture(canvas), false);
         const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
         const sprite = new THREE.Sprite(spriteMat);
         sprite.scale.set(sizeScale, sizeScale, 1);
@@ -522,6 +536,396 @@ class ProceduralModels {
     }
 
     // ------------------------------------------------------------------------
+    // C3. 2-TIER MONUMENT LABEL & ZOOM-OUT TIER ICON (CẤP 1 / 2 / 3 / LOCKED / CONQUERED)
+    // ------------------------------------------------------------------------
+    static createMonumentTierLabelSprite(name, tier, state = { mode: "active" }) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 640;
+        canvas.height = 216;
+        const ctx = canvas.getContext("2d");
+
+        const mode = (state && state.mode) || "active";
+        const tierStyleMap = {
+            1: { badgeText: "★ CẤP 1", badgeBg: "#059669", border: "#34d399" },
+            2: { badgeText: "★★ CẤP 2", badgeBg: "#d97706", border: "#fde047" },
+            3: { badgeText: "★★★ CẤP 3", badgeBg: "#dc2626", border: "#fb923c" }
+        };
+        const baseStyle = tierStyleMap[tier] || tierStyleMap[1];
+
+        let badgeText = baseStyle.badgeText;
+        let badgeBg = baseStyle.badgeBg;
+        let borderColor = baseStyle.border;
+        let conquerorDotColor = null;
+
+        if (mode === "early_locked") {
+            badgeText = `🔒 CẤP ${tier} • MỞ 08:30`;
+            badgeBg = "#475569";
+            borderColor = "#94a3b8";
+        } else if (mode === "conquered") {
+            const cName = (state && state.conquerorName) ? String(state.conquerorName) : "Đã Chinh Phục";
+            badgeText = `✅ ${cName.length > 18 ? cName.slice(0, 17) + "…" : cName}`;
+            badgeBg = "#0f172a";
+            borderColor = (state && state.conquerorColor) || "#34d399";
+            conquerorDotColor = borderColor;
+        }
+
+        // Main dark navy plaque with strong high-contrast border
+        const x = 18, y = 40, w = 604, h = 154;
+        ctx.save();
+        ctx.shadowColor = "rgba(0, 0, 0, 0.72)";
+        ctx.shadowBlur = 14;
+        ctx.shadowOffsetY = 5;
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, 22);
+        const grad = ctx.createLinearGradient(0, y, 0, y + h);
+        grad.addColorStop(0, "rgba(11, 22, 42, 0.96)");
+        grad.addColorStop(1, "rgba(7, 15, 30, 0.98)");
+        ctx.fillStyle = grad;
+        ctx.fill();
+        ctx.restore();
+
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, 22);
+        ctx.lineWidth = 7;
+        ctx.strokeStyle = borderColor;
+        ctx.stroke();
+
+        // Top Tier Badge Ribbon (overlapping top edge for crisp 2-tier readability)
+        const pillW = mode === "active" ? 310 : 440;
+        const pillH = 56;
+        const pillX = (640 - pillW) / 2;
+        const pillY = 10;
+
+        ctx.save();
+        ctx.shadowColor = "rgba(0, 0, 0, 0.65)";
+        ctx.shadowBlur = 10;
+        ctx.beginPath();
+        ctx.roundRect(pillX, pillY, pillW, pillH, 16);
+        ctx.fillStyle = badgeBg;
+        ctx.fill();
+        ctx.restore();
+
+        ctx.beginPath();
+        ctx.roundRect(pillX, pillY, pillW, pillH, 16);
+        ctx.lineWidth = 5;
+        ctx.strokeStyle = borderColor;
+        ctx.stroke();
+
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "900 28px 'Segoe UI', Roboto, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.shadowColor = "rgba(0, 0, 0, 0.85)";
+        ctx.shadowBlur = 4;
+
+        if (conquerorDotColor) {
+            const textW = Math.min(pillW - 64, ctx.measureText(badgeText).width);
+            const dotX = 320 - textW / 2 - 16;
+            const dotY = pillY + pillH / 2;
+            ctx.beginPath();
+            ctx.arc(dotX, dotY, 10, 0, Math.PI * 2);
+            ctx.fillStyle = conquerorDotColor;
+            ctx.fill();
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = "#ffffff";
+            ctx.stroke();
+            ctx.fillStyle = "#ffffff";
+            ctx.fillText(badgeText, 320 + 12, dotY + 1, pillW - 56);
+        } else {
+            ctx.fillText(badgeText, 320, pillY + pillH / 2 + 1, pillW - 24);
+        }
+
+        // Bottom line: Short Monument Name (crisp strokeText + fillText for far zoom)
+        const shortName = String(name || "Di Tích").replace(/^Di tích\s+/i, "");
+        ctx.font = "900 38px 'Segoe UI', Roboto, sans-serif";
+        ctx.lineJoin = "round";
+        ctx.shadowColor = "rgba(0, 0, 0, 0.92)";
+        ctx.shadowBlur = 6;
+        ctx.lineWidth = 6;
+        ctx.strokeStyle = "rgba(2, 6, 23, 0.96)";
+        ctx.strokeText(shortName, 320, y + 98, w - 40);
+        ctx.fillStyle = mode === "early_locked" ? "#cbd5e1" : "#ffffff";
+        ctx.fillText(shortName, 320, y + 98, w - 40);
+
+        const texture = ProceduralModels.configureSharpCanvasTexture(new THREE.CanvasTexture(canvas), false);
+        const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+        const sprite = new THREE.Sprite(spriteMat);
+        sprite.scale.set(2.95, 1.00, 1);
+        sprite.renderOrder = 995;
+        return sprite;
+    }
+
+    static createMonumentCompactIconSprite(tier, state = { mode: "active" }) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 184;
+        canvas.height = 184;
+        const ctx = canvas.getContext("2d");
+
+        const mode = (state && state.mode) || "active";
+        const borderMap = { 1: "#34d399", 2: "#fde047", 3: "#fb923c" };
+        const bgAccentMap = { 1: "rgba(5, 150, 105, 0.94)", 2: "rgba(217, 119, 6, 0.94)", 3: "rgba(220, 38, 38, 0.94)" };
+
+        let borderHex = borderMap[tier] || "#fde047";
+        let bgHex = "rgba(11, 22, 42, 0.94)";
+        let labelText = `🏛️${tier}`;
+        let badgePillBg = bgAccentMap[tier] || bgAccentMap[1];
+
+        if (mode === "early_locked") {
+            borderHex = "#94a3b8";
+            badgePillBg = "rgba(71, 85, 105, 0.95)";
+            labelText = `🔒${tier}`;
+        } else if (mode === "conquered") {
+            borderHex = (state && state.conquerorColor) || "#34d399";
+            badgePillBg = borderHex;
+            labelText = `✅${tier}`;
+        }
+
+        ctx.save();
+        ctx.shadowColor = "rgba(0, 0, 0, 0.85)";
+        ctx.shadowBlur = 14;
+        ctx.beginPath();
+        ctx.arc(92, 92, 68, 0, Math.PI * 2);
+        ctx.fillStyle = bgHex;
+        ctx.fill();
+        ctx.restore();
+
+        // Colored top-half arc highlight for instant tier recognition when zoomed out
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(92, 92, 64, Math.PI * 1.12, Math.PI * 1.88);
+        ctx.lineWidth = 10;
+        ctx.strokeStyle = badgePillBg;
+        ctx.stroke();
+        ctx.restore();
+
+        ctx.beginPath();
+        ctx.arc(92, 92, 68, 0, Math.PI * 2);
+        ctx.lineWidth = 9;
+        ctx.strokeStyle = borderHex;
+        ctx.stroke();
+
+        ctx.font = "900 60px 'Segoe UI Emoji', 'Segoe UI', sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.lineJoin = "round";
+        ctx.shadowColor = "rgba(0, 0, 0, 0.9)";
+        ctx.shadowBlur = 6;
+        ctx.lineWidth = 6;
+        ctx.strokeStyle = "rgba(2, 6, 23, 0.95)";
+        ctx.strokeText(labelText, 92, 95);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(labelText, 92, 95);
+
+        const texture = ProceduralModels.configureSharpCanvasTexture(new THREE.CanvasTexture(canvas), false);
+        const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+        const sprite = new THREE.Sprite(spriteMat);
+        sprite.scale.set(1.42, 1.42, 1);
+        sprite.renderOrder = 990;
+        return sprite;
+    }
+
+    // ------------------------------------------------------------------------
+    // C4. 2-TIER TRADE PORT OWNERSHIP LABEL & ZOOM-OUT ICON (MINE / FREE / OTHER)
+    // ------------------------------------------------------------------------
+    static createPortOwnershipLabelSprite(portName, specialtyLabel, state = { mode: "free" }) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 640;
+        canvas.height = 216;
+        const ctx = canvas.getContext("2d");
+
+        const mode = (state && state.mode) || "free";
+        const needsCoinWarning = Boolean(state && state.needsCoinWarning);
+        const ownerName = (state && state.ownerName) ? String(state.ownerName) : "";
+        const ownerColor = (state && state.ownerColor) || "#38bdf8";
+
+        let badgeText = "🌐 CẢNG TỰ DO • 0💰";
+        let badgeBg = "#0284c7";
+        let borderColor = "#38bdf8";
+        let cardBorderColor = "#38bdf8";
+        let ownerDotColor = null;
+
+        if (mode === "mine") {
+            badgeText = "👑 CẢNG CỦA BẠN • 0💰";
+            badgeBg = "#15803d";
+            borderColor = "#fde047";
+            cardBorderColor = "#22c55e";
+        } else if (mode === "other") {
+            const shortOwner = ownerName.length > 13 ? ownerName.slice(0, 12) + "…" : ownerName;
+            if (needsCoinWarning) {
+                badgeText = `⚓ ${shortOwner} • ⛔ CẦN 1💰`;
+                badgeBg = "#991b1b";
+                borderColor = "#fb923c";
+                cardBorderColor = "#ef4444";
+            } else {
+                badgeText = `⚓ ${shortOwner} • THUẾ 1💰`;
+                badgeBg = "#0f172a";
+                borderColor = ownerColor;
+                cardBorderColor = ownerColor;
+            }
+            ownerDotColor = ownerColor;
+        }
+
+        const x = 18, y = 40, w = 604, h = 154;
+        ctx.save();
+        ctx.shadowColor = "rgba(0, 0, 0, 0.72)";
+        ctx.shadowBlur = 14;
+        ctx.shadowOffsetY = 5;
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, 22);
+        const grad = ctx.createLinearGradient(0, y, 0, y + h);
+        grad.addColorStop(0, "rgba(10, 22, 42, 0.96)");
+        grad.addColorStop(1, "rgba(7, 15, 30, 0.98)");
+        ctx.fillStyle = grad;
+        ctx.fill();
+        ctx.restore();
+
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, 22);
+        ctx.lineWidth = 7;
+        ctx.strokeStyle = cardBorderColor;
+        ctx.stroke();
+
+        // Top Ownership Badge Ribbon
+        const pillW = mode === "other" ? 490 : 410;
+        const pillH = 54;
+        const pillX = (640 - pillW) / 2;
+        const pillY = 10;
+
+        ctx.save();
+        ctx.shadowColor = "rgba(0, 0, 0, 0.65)";
+        ctx.shadowBlur = 10;
+        ctx.beginPath();
+        ctx.roundRect(pillX, pillY, pillW, pillH, 16);
+        ctx.fillStyle = badgeBg;
+        ctx.fill();
+        ctx.restore();
+
+        ctx.beginPath();
+        ctx.roundRect(pillX, pillY, pillW, pillH, 16);
+        ctx.lineWidth = 5;
+        ctx.strokeStyle = borderColor;
+        ctx.stroke();
+
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "900 26px 'Segoe UI', Roboto, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.shadowColor = "rgba(0, 0, 0, 0.85)";
+        ctx.shadowBlur = 4;
+
+        if (ownerDotColor) {
+            const textW = Math.min(pillW - 64, ctx.measureText(badgeText).width);
+            const dotX = 320 - textW / 2 - 14;
+            const dotY = pillY + pillH / 2;
+            ctx.beginPath();
+            ctx.arc(dotX, dotY, 9, 0, Math.PI * 2);
+            ctx.fillStyle = ownerDotColor;
+            ctx.fill();
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = "#ffffff";
+            ctx.stroke();
+            ctx.fillStyle = "#ffffff";
+            ctx.fillText(badgeText, 320 + 10, dotY + 1, pillW - 54);
+        } else {
+            ctx.fillText(badgeText, 320, pillY + pillH / 2 + 1, pillW - 24);
+        }
+
+        // Port Name & Specialty line (crisp strokeText + fillText)
+        const shortPort = String(portName || "Thương Cảng").replace(/^Thương Cảng\s+/i, "Cảng ");
+        ctx.font = "900 34px 'Segoe UI', Roboto, sans-serif";
+        ctx.lineJoin = "round";
+        ctx.shadowColor = "rgba(0, 0, 0, 0.9)";
+        ctx.shadowBlur = 6;
+        ctx.lineWidth = 5.5;
+        ctx.strokeStyle = "rgba(2, 6, 23, 0.96)";
+        ctx.strokeText(shortPort, 320, y + 84, w - 40);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(shortPort, 320, y + 84, w - 40);
+
+        if (specialtyLabel) {
+            ctx.font = "700 22px 'Segoe UI', Roboto, sans-serif";
+            ctx.lineWidth = 4;
+            ctx.strokeText(specialtyLabel, 320, y + 126, w - 40);
+            ctx.fillStyle = "#fde68a";
+            ctx.fillText(specialtyLabel, 320, y + 126, w - 40);
+        }
+
+        const texture = ProceduralModels.configureSharpCanvasTexture(new THREE.CanvasTexture(canvas), false);
+        const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+        const sprite = new THREE.Sprite(spriteMat);
+        sprite.scale.set(2.90, 0.98, 1);
+        sprite.renderOrder = 994;
+        return sprite;
+    }
+
+    static createPortCompactIconSprite(state = { mode: "free" }) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 184;
+        canvas.height = 184;
+        const ctx = canvas.getContext("2d");
+
+        const mode = (state && state.mode) || "free";
+        const needsCoinWarning = Boolean(state && state.needsCoinWarning);
+        const ownerColor = (state && state.ownerColor) || "#38bdf8";
+
+        let borderHex = "#38bdf8";
+        let outerRingHex = null;
+        let labelText = "🌐⚓";
+
+        if (mode === "mine") {
+            borderHex = "#22c55e";
+            outerRingHex = "#fde047";
+            labelText = "👑⚓";
+        } else if (mode === "other") {
+            borderHex = needsCoinWarning ? "#ef4444" : ownerColor;
+            outerRingHex = needsCoinWarning ? "#fb923c" : null;
+            labelText = needsCoinWarning ? "⛔⚓" : "⚓";
+        }
+
+        ctx.save();
+        ctx.shadowColor = "rgba(0, 0, 0, 0.85)";
+        ctx.shadowBlur = 14;
+        ctx.beginPath();
+        ctx.arc(92, 92, 68, 0, Math.PI * 2);
+        ctx.fillStyle = mode === "mine" ? "rgba(10, 42, 28, 0.95)" : "rgba(11, 22, 42, 0.94)";
+        ctx.fill();
+        ctx.restore();
+
+        ctx.beginPath();
+        ctx.arc(92, 92, 68, 0, Math.PI * 2);
+        ctx.lineWidth = 10;
+        ctx.strokeStyle = borderHex;
+        ctx.stroke();
+
+        if (outerRingHex) {
+            ctx.beginPath();
+            ctx.arc(92, 92, 76, 0, Math.PI * 2);
+            ctx.lineWidth = 5;
+            ctx.strokeStyle = outerRingHex;
+            ctx.stroke();
+        }
+
+        ctx.font = labelText.length > 2 ? "900 50px 'Segoe UI Emoji', 'Segoe UI', sans-serif" : "900 62px 'Segoe UI Emoji', 'Segoe UI', sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.lineJoin = "round";
+        ctx.shadowColor = "rgba(0, 0, 0, 0.9)";
+        ctx.shadowBlur = 6;
+        ctx.lineWidth = 5.5;
+        ctx.strokeStyle = "rgba(2, 6, 23, 0.95)";
+        ctx.strokeText(labelText, 92, 95);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(labelText, 92, 95);
+
+        const texture = ProceduralModels.configureSharpCanvasTexture(new THREE.CanvasTexture(canvas), false);
+        const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+        const sprite = new THREE.Sprite(spriteMat);
+        sprite.scale.set(1.40, 1.40, 1);
+        sprite.renderOrder = 990;
+        return sprite;
+    }
+
+    // ------------------------------------------------------------------------
     // 1. 5 LOW-POLY TRADITIONAL MERCHANT SAILING SHIPS (DISTINCT TEAM COLORS)
     //    - MeshLambertMaterial with flatShading: true, zero PointLight
     //    - Tapered curved bow & raised stern (y = 0 at waterline), warm wood hull
@@ -530,145 +934,596 @@ class ProceduralModels {
     //      sails with horizontal team-colored stripes & fluttering pennant flag!
     // ------------------------------------------------------------------------
     static createPlayerShip(archetypeId, playerName = "", isLocalPlayer = false) {
-        const arch = window.GAME_DATA.shipArchetypes[archetypeId % 5];
+        const archIdx = ((archetypeId % 5) + 5) % 5;
+        const arch = window.GAME_DATA.shipArchetypes[archIdx];
+        const style = arch.style || ["dragon_junk", "emerald_catamaran", "ocean_clipper", "golden_galley", "imperial_bark"][archIdx];
         const group = new THREE.Group();
 
         const teamColor = new THREE.Color(arch.color);
+        const mutedTeamColor = teamColor.clone().lerp(new THREE.Color(0x5a4632), 0.24);
         const mat = (color, opts = {}) => new THREE.MeshLambertMaterial({
             color,
             emissive: color,
-            emissiveIntensity: 0.16,
+            emissiveIntensity: 0.04,
             flatShading: true,
             ...opts
         });
 
-        const warmWoodMat = mat(0x854d27);
-        const darkWoodMat = mat(0x4e270f);
-        const lightDeckMat = mat(0xdeb078);
-        const glassDarkMat = mat(0x0f172a, { emissiveIntensity: 0.05 });
-        const creamSailMat = mat(0xffffff, { emissive: 0xffffff, emissiveIntensity: 0.18, side: THREE.DoubleSide });
-        const teamMat = mat(teamColor, { emissive: teamColor, emissiveIntensity: 0.30 });
-        const teamStripeMat = mat(teamColor, { emissive: teamColor, emissiveIntensity: 0.30, side: THREE.DoubleSide });
-        const goldMat = mat(0xfacc15, { emissive: 0xeab308, emissiveIntensity: 0.28 });
+        // Natural matte maritime materials (low emissive 0.02-0.08 -> zero plastic gloss)
+        const warmWoodMat = mat(0x7a4b2a, { emissiveIntensity: 0.02 });
+        const darkWoodMat = mat(0x462612, { emissiveIntensity: 0.02 });
+        const bambooMat = mat(0x522e15, { emissiveIntensity: 0.02 });
+        const lightDeckMat = mat(0xcfa572, { emissiveIntensity: 0.02 });
+        const ropeMat = mat(0x3a2819, { emissiveIntensity: 0.01 });
+        const sackMat = mat(0xb89a6a, { emissiveIntensity: 0.02 });
+        const crateLightMat = mat(0xb5834b, { emissiveIntensity: 0.02 });
+        const crateBlueMat = mat(0x2d5e7a, { emissiveIntensity: 0.03 });
+        const glassDarkMat = mat(0x13202e, { emissiveIntensity: 0.02 });
+        const creamSailMat = mat(0xefe2c4, { emissive: 0xefe2c4, emissiveIntensity: 0.05, side: THREE.DoubleSide });
+        const pureWhiteSailMat = mat(0xf2ead6, { emissive: 0xf2ead6, emissiveIntensity: 0.06, side: THREE.DoubleSide });
+        const mintSailMat = mat(0xd8eadf, { emissive: 0xd8eadf, emissiveIntensity: 0.05, side: THREE.DoubleSide });
+        const teamMat = mat(mutedTeamColor, { emissive: mutedTeamColor, emissiveIntensity: 0.07 });
+        const teamStripeMat = mat(mutedTeamColor, { emissive: mutedTeamColor, emissiveIntensity: 0.08, side: THREE.DoubleSide });
+        // Keep team pennant crisp & recognizable for map identification
+        const vividFlagMat = mat(teamColor, { emissive: teamColor, emissiveIntensity: 0.22 });
+        const crimsonMat = mat(0x9c2222, { emissive: 0x7f1d1d, emissiveIntensity: 0.06 });
+        const royalPurpleMat = mat(0x652b8c, { emissive: 0x4c1d70, emissiveIntensity: 0.06 });
+        const deepEmeraldMat = mat(0x176348, { emissive: 0x0f4c36, emissiveIntensity: 0.06 });
+        const oceanBlueMat = mat(0x1b5e8a, { emissive: 0x134566, emissiveIntensity: 0.06 });
+        const goldHullMat = mat(0xc59624, { emissive: 0x9a7318, emissiveIntensity: 0.07 });
+        const goldMat = mat(0xd9a734, { emissive: 0xb58620, emissiveIntensity: 0.09 });
 
-        // 1. Sculpted Tapered Wooden Hull (Pointed Bow +X, Gently Raised Stern -X, Waterline at y = 0)
-        const hullBodyGeo = new THREE.CylinderGeometry(0.46, 0.30, 1.32, 8);
-        hullBodyGeo.rotateZ(Math.PI / 2);
-        hullBodyGeo.scale(1.0, 0.62, 0.88);
-        const hullBody = new THREE.Mesh(hullBodyGeo, warmWoodMat);
-        hullBody.position.set(-0.04, 0.20, 0);
-        hullBody.castShadow = true;
+        let mainSail = new THREE.Group();
+        let foreSail = new THREE.Group();
+        let flag = null;
 
-        // Pointed Tapered Bow (+X)
-        const bowGeo = new THREE.ConeGeometry(0.44, 0.88, 6);
-        bowGeo.rotateZ(-Math.PI / 2);
-        bowGeo.scale(1.0, 0.64, 0.84);
-        const bowMesh = new THREE.Mesh(bowGeo, warmWoodMat);
-        bowMesh.position.set(0.96, 0.24, 0);
-        bowMesh.castShadow = true;
-
-        // Gently Raised Tapered Stern (-X)
-        const sternGeo = new THREE.ConeGeometry(0.42, 0.66, 6);
-        sternGeo.rotateZ(Math.PI / 2);
-        sternGeo.scale(1.0, 0.72, 0.84);
-        const sternMesh = new THREE.Mesh(sternGeo, darkWoodMat);
-        sternMesh.position.set(-0.92, 0.28, 0);
-        sternMesh.castShadow = true;
-
-        // Team-Colored Gunwale Trim Stripe along Both Sides of the Hull
-        const stripeBodyGeo = new THREE.CylinderGeometry(0.48, 0.45, 1.34, 8);
-        stripeBodyGeo.rotateZ(Math.PI / 2);
-        stripeBodyGeo.scale(1.0, 0.22, 0.91);
-        const hullStripe = new THREE.Mesh(stripeBodyGeo, teamMat);
-        hullStripe.position.set(-0.04, 0.38, 0);
-
-        const bowStripeGeo = new THREE.ConeGeometry(0.45, 0.86, 6);
-        bowStripeGeo.rotateZ(-Math.PI / 2);
-        bowStripeGeo.scale(1.0, 0.22, 0.88);
-        const bowStripe = new THREE.Mesh(bowStripeGeo, teamMat);
-        bowStripe.position.set(0.95, 0.39, 0);
-
-        // Light-Wood Main Deck
-        const deckGeo = new THREE.CylinderGeometry(0.40, 0.40, 1.36, 8);
-        deckGeo.rotateZ(Math.PI / 2);
-        deckGeo.scale(1.0, 0.10, 0.82);
-        const mainDeck = new THREE.Mesh(deckGeo, lightDeckMat);
-        mainDeck.position.set(0.02, 0.41, 0);
-
-        // Bowsprit pointing forward at bow
-        const bowsprit = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.042, 0.70, 6), darkWoodMat);
-        bowsprit.rotation.z = -Math.PI / 3.1;
-        bowsprit.position.set(1.32, 0.56, 0);
-
-        group.add(hullBody, bowMesh, sternMesh, hullStripe, bowStripe, mainDeck, bowsprit);
-
-        // 2. Small Stern Pilot Cabin with Dark Glass Windows + 2 Mini Wooden Cargo Crates/Barrels
-        const cabinBody = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.34, 0.54), warmWoodMat);
-        cabinBody.position.set(-0.56, 0.60, 0);
-        cabinBody.castShadow = true;
-        const cabinWindows = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.11, 0.44), glassDarkMat);
-        cabinWindows.position.set(-0.56, 0.64, 0);
-        const cabinSideWin = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.11, 0.56), glassDarkMat);
-        cabinSideWin.position.set(-0.56, 0.64, 0);
-        const cabinRoof = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.08, 0.60), teamMat);
-        cabinRoof.position.set(-0.56, 0.80, 0);
-        group.add(cabinBody, cabinWindows, cabinSideWin, cabinRoof);
-
-        const crate1 = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.16, 0.18), darkWoodMat);
-        crate1.position.set(0.24, 0.50, 0.18);
-        const barrel1 = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.17, 7), darkWoodMat);
-        barrel1.position.set(0.22, 0.50, -0.18);
-        group.add(crate1, barrel1);
-
-        // 3. Two Masts (Tall Main Mast + Shorter Fore Mast) + 2 Curved Cream Sails with Team Stripes
-        const mainMast = new THREE.Mesh(new THREE.CylinderGeometry(0.036, 0.056, 1.98, 7), darkWoodMat);
-        mainMast.position.set(-0.02, 1.38, 0);
-        const foreMast = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.044, 1.44, 7), darkWoodMat);
-        foreMast.position.set(0.62, 1.12, 0);
-        group.add(mainMast, foreMast);
-
-        const buildStripedBillowingSail = (radius, height, xPos, yPos) => {
-            const sGroup = new THREE.Group();
-            const sGeo = new THREE.CylinderGeometry(radius, radius * 1.04, height, 10, 1, true, -Math.PI * 0.34, Math.PI * 0.68);
-            const sMesh = new THREE.Mesh(sGeo, creamSailMat);
-            sMesh.rotation.y = Math.PI / 2;
-            sMesh.position.x = -radius * 0.52;
-            sMesh.castShadow = true;
-            sGroup.add(sMesh);
-
-            // 2 Horizontal Team-Colored Stripes across the Billowing Sail
-            [-height * 0.22, height * 0.22].forEach(sy => {
-                const stGeo = new THREE.CylinderGeometry(radius * 1.015, radius * 1.03, height * 0.16, 10, 1, true, -Math.PI * 0.34, Math.PI * 0.68);
-                const stMesh = new THREE.Mesh(stGeo, teamStripeMat);
-                stMesh.rotation.y = Math.PI / 2;
-                stMesh.position.set(-radius * 0.52, sy, 0);
-                sGroup.add(stMesh);
-            });
-
-            // Top & Bottom Wooden Yard Spars
-            [height * 0.48, -height * 0.48].forEach(yy => {
-                const spar = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, radius * 1.24, 5), darkWoodMat);
-                spar.rotation.x = Math.PI / 2;
-                spar.position.set(radius * 0.36, yy, 0);
-                sGroup.add(spar);
-            });
-
-            sGroup.position.set(xPos, yPos, 0);
-            return sGroup;
+        // Shared lightweight rigging / deck prop helpers (castShadow = false for 60 FPS)
+        const addShroudLine = (x1, y1, z1, x2, y2, z2) => {
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const dz = z2 - z1;
+            const len = Math.hypot(dx, dy, dz);
+            if (len < 0.05) return;
+            const geo = new THREE.CylinderGeometry(0.011, 0.011, len, 4);
+            const line = new THREE.Mesh(geo, ropeMat);
+            line.position.set((x1 + x2) * 0.5, (y1 + y2) * 0.5, (z1 + z2) * 0.5);
+            if (typeof THREE.Vector3 === "function" && line.quaternion && typeof line.quaternion.setFromUnitVectors === "function") {
+                line.quaternion.setFromUnitVectors(
+                    new THREE.Vector3(0, 1, 0),
+                    new THREE.Vector3(dx / len, dy / len, dz / len)
+                );
+            }
+            line.castShadow = false;
+            group.add(line);
         };
 
-        const mainSail = buildStripedBillowingSail(0.66, 1.22, -0.02, 1.38);
-        const foreSail = buildStripedBillowingSail(0.46, 0.86, 0.62, 1.14);
-        group.add(mainSail, foreSail);
+        const addHelmAndRudder = (xHelm, yHelm, xStern) => {
+            // Miniature helm post + wooden steering wheel
+            const post = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.16, 0.06), darkWoodMat);
+            post.position.set(xHelm, yHelm + 0.08, 0);
+            const wheelGeo = new THREE.RingGeometry(0.065, 0.095, 8);
+            wheelGeo.rotateY(Math.PI / 2);
+            const wheel = new THREE.Mesh(wheelGeo, warmWoodMat);
+            wheel.position.set(xHelm + 0.04, yHelm + 0.14, 0);
+            const hub = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.04, 0.04), goldMat);
+            hub.position.set(xHelm + 0.04, yHelm + 0.14, 0);
+            // Stern rudder blade dipping to waterline
+            const rudder = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.28, 0.04), darkWoodMat);
+            rudder.position.set(xStern, 0.16, 0);
+            group.add(post, wheel, hub, rudder);
+        };
 
-        // Small Fluttering Pennant Flag on Top of Main Mast
-        const flagGeo = new THREE.ConeGeometry(0.16, 0.56, 3);
-        flagGeo.rotateZ(Math.PI / 2);
-        const flag = new THREE.Mesh(flagGeo, teamMat);
-        flag.position.set(-0.26, 2.30, 0);
-        const mastFinial = new THREE.Mesh(new THREE.OctahedronGeometry(0.08, 0), goldMat);
-        mastFinial.position.set(-0.02, 2.40, 0);
-        group.add(flag, mastFinial);
+        const addLowDeckRailings = (xStart, xEnd, yBase, halfZ) => {
+            const span = Math.max(0.2, xEnd - xStart);
+            const midX = (xStart + xEnd) * 0.5;
+            [-halfZ, halfZ].forEach((zPos) => {
+                const topRail = new THREE.Mesh(new THREE.BoxGeometry(span, 0.032, 0.032), darkWoodMat);
+                topRail.position.set(midX, yBase + 0.11, zPos);
+                group.add(topRail);
+                [xStart + 0.06, midX, xEnd - 0.06].forEach((px) => {
+                    const stanchion = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.11, 0.03), darkWoodMat);
+                    stanchion.position.set(px, yBase + 0.055, zPos);
+                    group.add(stanchion);
+                });
+            });
+        };
+
+        const addRopeCoilAndSacks = (x, y, z) => {
+            const coil = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.095, 0.045, 7), sackMat);
+            coil.position.set(x, y + 0.025, z);
+            const sack1 = new THREE.Mesh(new THREE.DodecahedronGeometry(0.085, 0), sackMat);
+            sack1.scale.set(1.25, 0.72, 0.95);
+            sack1.position.set(x - 0.12, y + 0.06, z * -0.8);
+            const sack2 = new THREE.Mesh(new THREE.DodecahedronGeometry(0.075, 0), crateLightMat);
+            sack2.scale.set(1.15, 0.68, 0.92);
+            sack2.position.set(x - 0.02, y + 0.055, z * -0.95);
+            group.add(coil, sack1, sack2);
+        };
+
+        const addFlagAt = (x, y, z, flagMat = vividFlagMat, dir = -1) => {
+            const flagGeo = new THREE.ConeGeometry(0.15, 0.52, 3);
+            flagGeo.rotateZ(dir < 0 ? Math.PI / 2 : -Math.PI / 2);
+            const fMesh = new THREE.Mesh(flagGeo, flagMat);
+            fMesh.position.set(x + dir * 0.24, y, z);
+            const finial = new THREE.Mesh(new THREE.OctahedronGeometry(0.075, 0), goldMat);
+            finial.position.set(x, y + 0.08, z);
+            group.add(fMesh, finial);
+            return fMesh;
+        };
+
+        // Helper: Bat-wing Junk Sail with 4-5 horizontal bamboo battens
+        const buildJunkBatSail = (wTop, wBot, h, battenCount, xPos, yPos) => {
+            const sg = new THREE.Group();
+            const segs = battenCount;
+            const segH = h / segs;
+            for (let i = 0; i < segs; i++) {
+                const t = i / Math.max(1, segs - 1);
+                const panelW = wBot + (wTop - wBot) * t;
+                const yOff = -h * 0.5 + segH * (i + 0.5);
+                const sweepX = (t - 0.35) * 0.14;
+                const panel = new THREE.Mesh(new THREE.BoxGeometry(panelW, segH * 0.94, 0.045), creamSailMat);
+                panel.position.set(sweepX, yOff, 0);
+                panel.rotation.z = -0.06;
+                panel.castShadow = true;
+                sg.add(panel);
+
+                // Dark-brown horizontal bamboo batten across each rib
+                const batten = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, panelW + 0.06, 5), bambooMat);
+                batten.rotation.z = Math.PI / 2 - 0.06;
+                batten.position.set(sweepX, yOff + segH * 0.45, 0);
+                sg.add(batten);
+            }
+            // Bottom boom spar
+            const boom = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, wBot + 0.08, 5), darkWoodMat);
+            boom.rotation.z = Math.PI / 2;
+            boom.position.set(-0.04, -h * 0.5, 0);
+            sg.add(boom);
+
+            sg.position.set(xPos, yPos, 0);
+            return sg;
+        };
+
+        // Helper: Billowing Square Sail (with optional muted team stripe & yards)
+        const buildSquareSail = (widthZ, height, bulgeX, xPos, yPos, baseMat, stripeMat) => {
+            const sg = new THREE.Group();
+            const r = Math.max(0.28, widthZ * 0.62);
+            const sGeo = new THREE.CylinderGeometry(r, r * 1.04, height, 8, 1, true, -Math.PI * 0.34, Math.PI * 0.68);
+            const sMesh = new THREE.Mesh(sGeo, baseMat);
+            sMesh.rotation.y = Math.PI / 2;
+            sMesh.scale.set(1.0, 1.0, bulgeX);
+            sMesh.position.x = -r * 0.46;
+            sMesh.castShadow = true;
+            sg.add(sMesh);
+
+            if (stripeMat) {
+                const stGeo = new THREE.CylinderGeometry(r * 1.02, r * 1.04, height * 0.20, 8, 1, true, -Math.PI * 0.34, Math.PI * 0.68);
+                const stMesh = new THREE.Mesh(stGeo, stripeMat);
+                stMesh.rotation.y = Math.PI / 2;
+                stMesh.scale.set(1.0, 1.0, bulgeX);
+                stMesh.position.set(-r * 0.46, 0, 0);
+                sg.add(stMesh);
+            }
+
+            [height * 0.49, -height * 0.49].forEach(yy => {
+                const spar = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, widthZ * 1.08, 5), darkWoodMat);
+                spar.rotation.x = Math.PI / 2;
+                spar.position.set(r * 0.28, yy, 0);
+                sg.add(spar);
+            });
+
+            sg.position.set(xPos, yPos, 0);
+            return sg;
+        };
+
+        // Helper: Sleek Triangular Sail (for Catamaran / Clipper Jib)
+        const buildTriangularSail = (baseLen, height, xPos, yPos, sailMat, trimMat, flipX = false) => {
+            const sg = new THREE.Group();
+            const coneGeo = new THREE.ConeGeometry(baseLen * 0.55, height, 3);
+            coneGeo.scale(1.0, 1.0, 0.10);
+            const sMesh = new THREE.Mesh(coneGeo, sailMat);
+            sMesh.position.set(flipX ? -baseLen * 0.22 : baseLen * 0.22, 0, 0);
+            sMesh.rotation.z = flipX ? -0.18 : 0.18;
+            sMesh.castShadow = true;
+            sg.add(sMesh);
+
+            if (trimMat) {
+                const trim = new THREE.Mesh(new THREE.BoxGeometry(baseLen * 0.88, 0.06, 0.07), trimMat);
+                trim.position.set(flipX ? -baseLen * 0.22 : baseLen * 0.22, -height * 0.44, 0);
+                sg.add(trim);
+            }
+            sg.position.set(xPos, yPos, 0);
+            return sg;
+        };
+
+        // ====================================================================
+        // STYLE 0: dragon_junk — Crimson Curved Junk + Golden Dragon Head + Bat-Wing Sails
+        // ====================================================================
+        if (style === "dragon_junk") {
+            const hullBodyGeo = new THREE.CylinderGeometry(0.45, 0.30, 1.32, 8);
+            hullBodyGeo.rotateZ(Math.PI / 2);
+            hullBodyGeo.scale(1.0, 0.62, 0.86);
+            const hullBody = new THREE.Mesh(hullBodyGeo, crimsonMat);
+            hullBody.position.set(-0.04, 0.22, 0);
+            hullBody.castShadow = true;
+
+            const bowGeo = new THREE.ConeGeometry(0.42, 0.86, 6);
+            bowGeo.rotateZ(-Math.PI / 2 + 0.22);
+            bowGeo.scale(1.0, 0.65, 0.82);
+            const bowMesh = new THREE.Mesh(bowGeo, crimsonMat);
+            bowMesh.position.set(0.92, 0.34, 0);
+            bowMesh.castShadow = true;
+
+            // Raised Stern Poop Deck (-X)
+            const sternBase = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.48, 0.68), crimsonMat);
+            sternBase.position.set(-0.82, 0.40, 0);
+            sternBase.castShadow = true;
+            const sternRail = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.09, 0.72), goldMat);
+            sternRail.position.set(-0.82, 0.66, 0);
+            const deck = new THREE.Mesh(new THREE.BoxGeometry(1.55, 0.08, 0.64), lightDeckMat);
+            deck.position.set(0.05, 0.43, 0);
+            const gunwaleGold = new THREE.Mesh(new THREE.BoxGeometry(1.42, 0.06, 0.76), goldMat);
+            gunwaleGold.position.set(0.02, 0.41, 0);
+            group.add(hullBody, bowMesh, sternBase, sternRail, deck, gunwaleGold);
+
+            // Stylized Dragon Head & Golden Horns at Swept-Up Bow (+X)
+            const neck = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.36, 0.20), crimsonMat);
+            neck.position.set(1.18, 0.56, 0);
+            neck.rotation.z = -0.35;
+            const snout = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.20, 0.24), crimsonMat);
+            snout.position.set(1.36, 0.72, 0);
+            const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.08, 0.20), goldMat);
+            jaw.position.set(1.36, 0.60, 0);
+            const mane = new THREE.Mesh(new THREE.OctahedronGeometry(0.14, 0), goldMat);
+            mane.position.set(1.22, 0.80, 0);
+            const hornL = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.26, 4), goldMat);
+            hornL.position.set(1.26, 0.90, 0.10);
+            hornL.rotation.z = 0.55;
+            const hornR = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.26, 4), goldMat);
+            hornR.position.set(1.26, 0.90, -0.10);
+            hornR.rotation.z = 0.55;
+            group.add(neck, snout, jaw, mane, hornL, hornR);
+
+            // 2 Prominent Bat-Wing Junk Sails + Small Stern Mizzen Fan
+            const mainMast = new THREE.Mesh(new THREE.CylinderGeometry(0.036, 0.052, 2.02, 6), darkWoodMat);
+            mainMast.position.set(0.00, 1.40, 0);
+            const foreMast = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.042, 1.48, 6), darkWoodMat);
+            foreMast.position.set(0.64, 1.12, 0);
+            const aftMast = new THREE.Mesh(new THREE.CylinderGeometry(0.024, 0.036, 1.24, 6), darkWoodMat);
+            aftMast.position.set(-0.74, 1.18, 0);
+            group.add(mainMast, foreMast, aftMast);
+
+            mainSail = buildJunkBatSail(0.56, 0.92, 1.28, 5, 0.04, 1.42);
+            foreSail = buildJunkBatSail(0.38, 0.64, 0.92, 4, 0.66, 1.16);
+            const aftSail = buildJunkBatSail(0.32, 0.52, 0.72, 4, -0.70, 1.24);
+            group.add(mainSail, foreSail, aftSail);
+
+            // Natural rigging shrouds, helm wheel, rudder, deck railings & rope/sacks
+            addShroudLine(0.00, 2.15, 0, -0.06, 0.46, 0.35);
+            addShroudLine(0.00, 2.15, 0, -0.06, 0.46, -0.35);
+            addShroudLine(0.64, 1.72, 0, 0.58, 0.46, 0.30);
+            addShroudLine(0.64, 1.72, 0, 0.58, 0.46, -0.30);
+            addShroudLine(0.00, 2.20, 0, 0.64, 1.78, 0);
+            addLowDeckRailings(-0.42, 0.52, 0.46, 0.34);
+            addHelmAndRudder(-0.56, 0.68, -1.16);
+            addRopeCoilAndSacks(0.32, 0.47, 0.16);
+
+            flag = addFlagAt(0.00, 2.38, 0, vividFlagMat, -1);
+
+        // ====================================================================
+        // STYLE 1: emerald_catamaran — Twin Parallel Hulls + Wide Deck + 2 Triangular Sails
+        // ====================================================================
+        } else if (style === "emerald_catamaran") {
+            [-0.34, 0.34].forEach((zOff) => {
+                const hBodyGeo = new THREE.CylinderGeometry(0.18, 0.13, 1.48, 7);
+                hBodyGeo.rotateZ(Math.PI / 2);
+                hBodyGeo.scale(1.0, 0.85, 0.92);
+                const hBody = new THREE.Mesh(hBodyGeo, deepEmeraldMat);
+                hBody.position.set(-0.04, 0.18, zOff);
+                hBody.castShadow = true;
+
+                const hBowGeo = new THREE.ConeGeometry(0.18, 0.76, 6);
+                hBowGeo.rotateZ(-Math.PI / 2);
+                hBowGeo.scale(1.0, 0.85, 0.90);
+                const hBow = new THREE.Mesh(hBowGeo, deepEmeraldMat);
+                hBow.position.set(1.04, 0.20, zOff);
+                hBow.castShadow = true;
+
+                const hSternGeo = new THREE.ConeGeometry(0.16, 0.44, 6);
+                hSternGeo.rotateZ(Math.PI / 2);
+                const hStern = new THREE.Mesh(hSternGeo, deepEmeraldMat);
+                hStern.position.set(-0.96, 0.21, zOff);
+
+                const hTrim = new THREE.Mesh(new THREE.BoxGeometry(1.52, 0.055, 0.25), warmWoodMat);
+                hTrim.position.set(0.02, 0.32, zOff);
+
+                const twinRudder = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.24, 0.035), darkWoodMat);
+                twinRudder.position.set(-1.14, 0.16, zOff);
+
+                group.add(hBody, hBow, hStern, hTrim, twinRudder);
+            });
+
+            // Wide Bridging Deck + Crossbeams + Dense Cargo Crates, Sacks & Compact Cabin
+            const bridgeDeck = new THREE.Mesh(new THREE.BoxGeometry(1.22, 0.09, 0.88), lightDeckMat);
+            bridgeDeck.position.set(-0.08, 0.38, 0);
+            bridgeDeck.castShadow = true;
+            const foreBeam = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.07, 0.84), warmWoodMat);
+            foreBeam.position.set(0.72, 0.36, 0);
+            const cabin = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.30, 0.56), warmWoodMat);
+            cabin.position.set(-0.46, 0.56, 0);
+            const cabinWin = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.10, 0.44), glassDarkMat);
+            cabinWin.position.set(-0.46, 0.60, 0);
+            const cabinRoof = new THREE.Mesh(new THREE.BoxGeometry(0.50, 0.06, 0.60), teamMat);
+            cabinRoof.position.set(-0.46, 0.73, 0);
+            const crateA = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.20, 0.24), crateLightMat);
+            crateA.position.set(0.24, 0.52, -0.18);
+            const crateB = new THREE.Mesh(new THREE.BoxGeometry(0.20, 0.16, 0.20), darkWoodMat);
+            crateB.position.set(0.20, 0.50, 0.18);
+            const barrelCat = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.075, 0.18, 7), warmWoodMat);
+            barrelCat.position.set(0.44, 0.51, -0.18);
+            group.add(bridgeDeck, foreBeam, cabin, cabinWin, cabinRoof, crateA, crateB, barrelCat);
+
+            // Central Mast + 2 Billowing Triangular Sails (Main + Fore Jib)
+            const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.036, 0.052, 2.08, 7), darkWoodMat);
+            mast.position.set(0.08, 1.42, 0);
+            group.add(mast);
+
+            mainSail = buildTriangularSail(0.96, 1.46, 0.06, 1.48, mintSailMat, teamMat, true);
+            foreSail = buildTriangularSail(0.84, 1.30, 0.14, 1.38, mintSailMat, teamMat, false);
+            group.add(mainSail, foreSail);
+
+            // Shrouds anchored cleanly to twin hulls, forestay, low deck rails, helm & sacks
+            addShroudLine(0.08, 2.28, 0, 0.04, 0.36, 0.42);
+            addShroudLine(0.08, 2.28, 0, 0.04, 0.36, -0.42);
+            addShroudLine(0.08, 2.34, 0, 0.96, 0.34, 0.34);
+            addShroudLine(0.08, 2.34, 0, 0.96, 0.34, -0.34);
+            addLowDeckRailings(-0.62, 0.46, 0.42, 0.42);
+            addRopeCoilAndSacks(0.40, 0.43, 0.18);
+            const catWheel = new THREE.Mesh(new THREE.RingGeometry(0.06, 0.085, 8), warmWoodMat);
+            catWheel.rotation.y = Math.PI / 2;
+            catWheel.position.set(-0.18, 0.56, 0);
+            group.add(catWheel);
+
+            flag = addFlagAt(0.08, 2.44, 0, vividFlagMat, -1);
+
+        // ====================================================================
+        // STYLE 2: ocean_clipper — Long Sleek Hull + Long Bowsprit + 3 Masts White/Blue Sails
+        // ====================================================================
+        } else if (style === "ocean_clipper") {
+            const hullBodyGeo = new THREE.CylinderGeometry(0.36, 0.24, 1.56, 8);
+            hullBodyGeo.rotateZ(Math.PI / 2);
+            hullBodyGeo.scale(1.0, 0.62, 0.74);
+            const hullBody = new THREE.Mesh(hullBodyGeo, oceanBlueMat);
+            hullBody.position.set(-0.04, 0.20, 0);
+            hullBody.castShadow = true;
+
+            const bowGeo = new THREE.ConeGeometry(0.35, 1.02, 6);
+            bowGeo.rotateZ(-Math.PI / 2);
+            bowGeo.scale(1.0, 0.64, 0.72);
+            const bowMesh = new THREE.Mesh(bowGeo, oceanBlueMat);
+            bowMesh.position.set(1.16, 0.24, 0);
+            bowMesh.castShadow = true;
+
+            const sternGeo = new THREE.ConeGeometry(0.34, 0.58, 6);
+            sternGeo.rotateZ(Math.PI / 2);
+            sternGeo.scale(1.0, 0.70, 0.72);
+            const sternMesh = new THREE.Mesh(sternGeo, oceanBlueMat);
+            sternMesh.position.set(-1.02, 0.25, 0);
+
+            const deck = new THREE.Mesh(new THREE.BoxGeometry(1.75, 0.08, 0.48), lightDeckMat);
+            deck.position.set(0.02, 0.38, 0);
+            const woodTrim = new THREE.Mesh(new THREE.BoxGeometry(1.62, 0.06, 0.56), warmWoodMat);
+            woodTrim.position.set(0.02, 0.34, 0);
+
+            // Long Extending Bowsprit (+X)
+            const bowsprit = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.036, 0.96, 6), darkWoodMat);
+            bowsprit.rotation.z = -Math.PI / 2.75;
+            bowsprit.position.set(1.48, 0.56, 0);
+            group.add(hullBody, bowMesh, sternMesh, deck, woodTrim, bowsprit);
+
+            // 3 Slender Masts (Fore, Tallest Main, Mizzen)
+            const mastFore = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.040, 1.66, 6), darkWoodMat);
+            mastFore.position.set(0.58, 1.20, 0);
+            const mastMain = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.048, 2.12, 6), darkWoodMat);
+            mastMain.position.set(0.00, 1.44, 0);
+            const mastMizzen = new THREE.Mesh(new THREE.CylinderGeometry(0.024, 0.036, 1.46, 6), darkWoodMat);
+            mastMizzen.position.set(-0.58, 1.10, 0);
+            group.add(mastFore, mastMain, mastMizzen);
+
+            // 3 Off-White Billowing Sails with Ocean-Blue Stripes + Triangular Bow Jib
+            mainSail = new THREE.Group();
+            const mainLower = buildSquareSail(0.74, 0.68, 0.85, 0, -0.26, pureWhiteSailMat, oceanBlueMat);
+            const mainUpper = buildSquareSail(0.58, 0.56, 0.85, 0, 0.42, pureWhiteSailMat, oceanBlueMat);
+            mainSail.add(mainLower, mainUpper);
+            mainSail.position.set(0.00, 1.42, 0);
+
+            foreSail = new THREE.Group();
+            const foreSq = buildSquareSail(0.58, 0.84, 0.85, 0, 0, pureWhiteSailMat, oceanBlueMat);
+            const bowJib = buildTriangularSail(0.76, 1.04, 0.52, -0.06, pureWhiteSailMat, oceanBlueMat, false);
+            foreSail.add(foreSq, bowJib);
+            foreSail.position.set(0.58, 1.24, 0);
+
+            const mizzenSail = buildSquareSail(0.46, 0.72, 0.85, -0.58, 1.18, pureWhiteSailMat, oceanBlueMat);
+            group.add(mainSail, foreSail, mizzenSail);
+
+            // Clipper Rigging Stays, Low Rails, Aft Helm Wheel & Rope Coil
+            addShroudLine(0.00, 2.26, 0, -0.04, 0.40, 0.28);
+            addShroudLine(0.00, 2.26, 0, -0.04, 0.40, -0.28);
+            addShroudLine(0.58, 1.92, 0, 1.82, 0.74, 0);
+            addShroudLine(0.00, 2.30, 0, 0.58, 1.92, 0);
+            addShroudLine(0.00, 2.24, 0, -0.58, 1.76, 0);
+            addShroudLine(-0.58, 1.76, 0, -0.96, 0.42, 0);
+            addLowDeckRailings(-0.78, 0.82, 0.41, 0.25);
+            addHelmAndRudder(-0.82, 0.42, -1.26);
+            addRopeCoilAndSacks(0.32, 0.42, 0.11);
+
+            flag = addFlagAt(0.00, 2.48, 0, vividFlagMat, -1);
+
+        // ====================================================================
+        // STYLE 3: golden_galley — Golden Shielded Hull + 2-Tier Stern Pavilion + Central Mast
+        // ====================================================================
+        } else if (style === "golden_galley") {
+            const hullBodyGeo = new THREE.CylinderGeometry(0.46, 0.30, 1.46, 8);
+            hullBodyGeo.rotateZ(Math.PI / 2);
+            hullBodyGeo.scale(1.0, 0.60, 0.88);
+            const hullBody = new THREE.Mesh(hullBodyGeo, goldHullMat);
+            hullBody.position.set(-0.02, 0.20, 0);
+            hullBody.castShadow = true;
+
+            const bowGeo = new THREE.ConeGeometry(0.42, 0.82, 6);
+            bowGeo.rotateZ(-Math.PI / 2 + 0.18);
+            bowGeo.scale(1.0, 0.64, 0.84);
+            const bowMesh = new THREE.Mesh(bowGeo, goldHullMat);
+            bowMesh.position.set(0.98, 0.30, 0);
+            bowMesh.castShadow = true;
+
+            const sternGeo = new THREE.BoxGeometry(0.76, 0.44, 0.72);
+            const sternMesh = new THREE.Mesh(sternGeo, goldHullMat);
+            sternMesh.position.set(-0.70, 0.36, 0);
+            sternMesh.castShadow = true;
+
+            const deck = new THREE.Mesh(new THREE.BoxGeometry(1.66, 0.08, 0.68), lightDeckMat);
+            deck.position.set(0.02, 0.41, 0);
+            const gunwaleRed = new THREE.Mesh(new THREE.BoxGeometry(1.54, 0.06, 0.78), crimsonMat);
+            gunwaleRed.position.set(0.02, 0.40, 0);
+            group.add(hullBody, bowMesh, sternMesh, deck, gunwaleRed);
+
+            // Row of Circular Antique-Gold Shields along Both Sides of the Hull
+            const shieldGeo = new THREE.CylinderGeometry(0.11, 0.11, 0.04, 8);
+            shieldGeo.rotateX(Math.PI / 2);
+            [-0.41, 0.41].forEach((zSide) => {
+                [-0.32, -0.02, 0.28, 0.58].forEach((xPos) => {
+                    const sh = new THREE.Mesh(shieldGeo, goldMat);
+                    sh.position.set(xPos, 0.36, zSide);
+                    const boss = new THREE.Mesh(new THREE.OctahedronGeometry(0.045, 0), crimsonMat);
+                    boss.position.set(xPos, 0.36, zSide + (zSide > 0 ? 0.025 : -0.025));
+                    group.add(sh, boss);
+                });
+            });
+
+            // 2-Tier Traditional Pavilion (Lầu Gác 2 Tầng) at the Stern (-X)
+            const pav = new THREE.Group();
+            const floor1 = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.38, 0.66), warmWoodMat);
+            floor1.position.y = 0.19;
+            const win1 = new THREE.Mesh(new THREE.BoxGeometry(0.70, 0.16, 0.46), glassDarkMat);
+            win1.position.y = 0.21;
+            const win1Side = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.16, 0.68), glassDarkMat);
+            win1Side.position.y = 0.21;
+            const roof1 = new THREE.Mesh(new THREE.ConeGeometry(0.58, 0.22, 4), crimsonMat);
+            roof1.rotation.y = Math.PI / 4;
+            roof1.position.y = 0.47;
+            // Upper open-pillar gallery + upturned curved roof
+            [[-0.20, -0.20], [0.20, -0.20], [-0.20, 0.20], [0.20, 0.20]].forEach(([px, pz]) => {
+                const col = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.032, 0.38, 6), crimsonMat);
+                col.position.set(px, 0.72, pz);
+                pav.add(col);
+            });
+            const upperCore = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.30, 0.32), glassDarkMat);
+            upperCore.position.y = 0.70;
+            const roof2 = new THREE.Mesh(new THREE.ConeGeometry(0.52, 0.28, 4), crimsonMat);
+            roof2.rotation.y = Math.PI / 4;
+            roof2.position.y = 1.00;
+            const roofGoldTrim = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.05, 0.62), goldMat);
+            roofGoldTrim.position.y = 0.89;
+            const spire = new THREE.Mesh(new THREE.OctahedronGeometry(0.085, 0), goldMat);
+            spire.position.y = 1.18;
+            pav.add(floor1, win1, win1Side, roof1, upperCore, roof2, roofGoldTrim, spire);
+            pav.position.set(-0.62, 0.56, 0);
+            group.add(pav);
+
+            // Grand Central Mast + Ceremonial Fore Mast
+            const mainMast = new THREE.Mesh(new THREE.CylinderGeometry(0.038, 0.056, 1.98, 7), darkWoodMat);
+            mainMast.position.set(0.24, 1.38, 0);
+            const foreMast = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.038, 1.30, 6), darkWoodMat);
+            foreMast.position.set(0.84, 1.04, 0);
+            group.add(mainMast, foreMast);
+
+            mainSail = buildSquareSail(0.82, 1.18, 0.90, 0.24, 1.40, creamSailMat, crimsonMat);
+            foreSail = buildSquareSail(0.42, 0.62, 0.80, 0.84, 1.14, creamSailMat, goldMat);
+            group.add(mainSail, foreSail);
+
+            // Mast shrouds, stern rudder, low foredeck railings & ceremonial cargo
+            addShroudLine(0.24, 2.18, 0, 0.16, 0.44, 0.35);
+            addShroudLine(0.24, 2.18, 0, 0.16, 0.44, -0.35);
+            addShroudLine(0.24, 2.22, 0, 0.84, 1.66, 0);
+            addLowDeckRailings(-0.22, 0.72, 0.44, 0.35);
+            const galleyRudder = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.28, 0.04), darkWoodMat);
+            galleyRudder.position.set(-1.12, 0.16, 0);
+            group.add(galleyRudder);
+            addRopeCoilAndSacks(0.56, 0.45, 0.16);
+
+            flag = addFlagAt(0.24, 2.36, 0, vividFlagMat, -1);
+
+        // ====================================================================
+        // STYLE 4: imperial_bark — Wide Purple Merchant Hull + Heavy Cargo + 2 Wide Square Sails
+        // ====================================================================
+        } else {
+            const hullBodyGeo = new THREE.CylinderGeometry(0.56, 0.42, 1.42, 8);
+            hullBodyGeo.rotateZ(Math.PI / 2);
+            hullBodyGeo.scale(1.0, 0.68, 1.06);
+            const hullBody = new THREE.Mesh(hullBodyGeo, royalPurpleMat);
+            hullBody.position.set(-0.04, 0.24, 0);
+            hullBody.castShadow = true;
+
+            const bowGeo = new THREE.ConeGeometry(0.54, 0.72, 6);
+            bowGeo.rotateZ(-Math.PI / 2);
+            bowGeo.scale(1.0, 0.68, 1.04);
+            const bowMesh = new THREE.Mesh(bowGeo, royalPurpleMat);
+            bowMesh.position.set(0.96, 0.27, 0);
+            bowMesh.castShadow = true;
+
+            const sternMesh = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.56, 0.96), royalPurpleMat);
+            sternMesh.position.set(-0.78, 0.40, 0);
+            sternMesh.castShadow = true;
+
+            const deck = new THREE.Mesh(new THREE.BoxGeometry(1.52, 0.08, 0.92), lightDeckMat);
+            deck.position.set(0.04, 0.46, 0);
+            const gunwaleTrim = new THREE.Mesh(new THREE.BoxGeometry(1.56, 0.065, 1.02), warmWoodMat);
+            gunwaleTrim.position.set(0.00, 0.49, 0);
+            group.add(hullBody, bowMesh, sternMesh, deck, gunwaleTrim);
+
+            // Abundant Midship Trade Cargo (Wooden Crates, Cloth Bales, Burlap Sacks & Oak Barrels)
+            const cargoSpecs = [
+                { type: "box", x: 0.16, y: 0.62, z: 0.22, s: [0.28, 0.26, 0.26], m: crateLightMat },
+                { type: "box", x: 0.18, y: 0.60, z: -0.22, s: [0.24, 0.22, 0.24], m: warmWoodMat },
+                { type: "box", x: 0.16, y: 0.84, z: 0.18, s: [0.20, 0.18, 0.20], m: crateLightMat },
+                { type: "box", x: -0.18, y: 0.60, z: -0.24, s: [0.26, 0.22, 0.26], m: crateBlueMat },
+                { type: "box", x: -0.20, y: 0.59, z: 0.24, s: [0.22, 0.20, 0.22], m: crateLightMat },
+                { type: "box", x: 0.54, y: 0.57, z: 0.18, s: [0.20, 0.18, 0.20], m: warmWoodMat },
+                { type: "barrel", x: 0.50, y: 0.57, z: -0.22, r: 0.09, h: 0.20, m: darkWoodMat },
+                { type: "barrel", x: -0.44, y: 0.57, z: 0.00, r: 0.09, h: 0.20, m: darkWoodMat }
+            ];
+            cargoSpecs.forEach((c) => {
+                const msh = c.type === "barrel"
+                    ? new THREE.Mesh(new THREE.CylinderGeometry(c.r, c.r, c.h, 7), c.m)
+                    : new THREE.Mesh(new THREE.BoxGeometry(c.s[0], c.s[1], c.s[2]), c.m);
+                msh.position.set(c.x, c.y, c.z);
+                msh.castShadow = false;
+                group.add(msh);
+            });
+
+            // 2 Classic Wide Square-Rigged Masts (Warm Ivory Sails with Royal Purple Stripes)
+            const mainMast = new THREE.Mesh(new THREE.CylinderGeometry(0.040, 0.058, 2.02, 7), darkWoodMat);
+            mainMast.position.set(-0.14, 1.44, 0);
+            const foreMast = new THREE.Mesh(new THREE.CylinderGeometry(0.034, 0.048, 1.62, 7), darkWoodMat);
+            foreMast.position.set(0.56, 1.24, 0);
+            group.add(mainMast, foreMast);
+
+            mainSail = buildSquareSail(1.06, 1.18, 0.88, -0.14, 1.48, creamSailMat, teamStripeMat);
+            foreSail = buildSquareSail(0.82, 0.90, 0.88, 0.56, 1.30, creamSailMat, teamStripeMat);
+            group.add(mainSail, foreSail);
+
+            // Merchant Bark Rigging, Low Rails, Aft Helm Wheel, Rudder & Deck Sacks/Rope
+            addShroudLine(-0.14, 2.24, 0, -0.20, 0.50, 0.48);
+            addShroudLine(-0.14, 2.24, 0, -0.20, 0.50, -0.48);
+            addShroudLine(0.56, 1.94, 0, 0.50, 0.50, 0.44);
+            addShroudLine(0.56, 1.94, 0, 0.50, 0.50, -0.44);
+            addShroudLine(-0.14, 2.28, 0, 0.56, 1.98, 0);
+            addLowDeckRailings(-0.46, 0.72, 0.50, 0.47);
+            addHelmAndRudder(-0.68, 0.68, -1.12);
+            addRopeCoilAndSacks(0.74, 0.50, 0.14);
+
+            flag = addFlagAt(-0.14, 2.44, 0, vividFlagMat, -1);
+        }
 
         // 4. Water Surface Identification Halo Ring + Vertical Light Beacon Pillar
         const outerRingGeo = new THREE.RingGeometry(1.06, 1.32, 28);
@@ -713,10 +1568,8 @@ class ProceduralModels {
             group.add(localRadarRing);
         }
 
-        // 5. Floating Player Ship Nameplate
-        const nameSprite = this.createPlayerShipNameplate(playerName || arch.name, arch.vesselTitle, arch.color, isLocalPlayer);
-        nameSprite.position.set(0, 3.10, 0);
-        group.add(nameSprite);
+        // 5. Floating Player Ship Nameplate (Rendered via crisp 2D HTML projected label #map-labels-layer)
+        const nameSprite = null;
 
         // 6. Local Player 3D Arrow Marker (ONLY visible on your own ship!)
         let myArrowMarker = null;
@@ -726,9 +1579,9 @@ class ProceduralModels {
             group.add(myArrowMarker);
         }
 
-        group.scale.setScalar(1.50);
+        group.scale.setScalar(1.48);
         group.userData = {
-            baseShipScale: 1.50,
+            baseShipScale: 1.48,
             mainSail,
             foreSail,
             flag,
@@ -739,7 +1592,7 @@ class ProceduralModels {
             nameSprite,
             myArrowMarker,
             archetype: arch,
-            archetypeId: archetypeId % 5,
+            archetypeId: archIdx,
             playerName: playerName || arch.name,
             isLocalPlayer: Boolean(isLocalPlayer)
         };
@@ -762,22 +1615,19 @@ class ProceduralModels {
         const r3 = this.seededRandom(seed + 3);
         const variant = (Math.abs(spec.q * 3 + spec.r * 5)) % 3;
 
-        const mat = (color, opts = {}) => {
-            const mutedCol = new THREE.Color(color);
-            mutedCol.offsetHSL(0, -0.26, -0.03);
-            return new THREE.MeshLambertMaterial({
-                color: mutedCol,
-                flatShading: true,
-                ...opts
-            });
-        };
+        // Natural warm Low-Poly materials for mainland dioramas (no wash-out, zero emissive, castShadow: false)
+        const mat = (color, opts = {}) => new THREE.MeshLambertMaterial({
+            color,
+            flatShading: true,
+            ...opts
+        });
 
         const woodMat = mat(0x6b3e1b);
         const darkWoodMat = mat(0x4a2511);
         const grayTrunkMat = mat(0x94a3b8);
-        const whiteMat = mat(0xf8fafc);
-        const canalTurqMat = mat(0x38a3b8); // Muted turquoise canal (no emissive on background props)
-        const siltCanalMat = mat(0xa86840); // Muted reddish-brown alluvial canal
+        const whiteMat = mat(0xf1f5f9);
+        const canalTurqMat = mat(0x288fa8);
+        const siltCanalMat = mat(0xa86840);
 
         const addTree = (x, z, scale = 1.0, style = "pine", leafColorHex = 0x15803d) => {
             const t = new THREE.Group();
@@ -839,16 +1689,34 @@ class ProceduralModels {
                 crown.scale.set(1.12, 0.94, 1.12);
                 crown.position.y = 0.40;
                 t.add(trunk, crown);
+            } else if (style === "casuarina") {
+                // Cây phi lao chắn gió ven biển Miền Trung (thân mảnh + tán chóp cao thon)
+                const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.036, 0.34, 5), darkWoodMat);
+                trunk.position.y = 0.17;
+                const c1 = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.44, 5), leafMat);
+                c1.position.y = 0.46;
+                const c2 = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.32, 5), leafMat);
+                c2.position.y = 0.68;
+                t.add(trunk, c1, c2);
+            } else if (style === "nipa") {
+                // Bụi dừa nước ĐBSCL (tàu lá tỏa thấp sát mặt nước)
+                for (let f = 0; f < 6; f++) {
+                    const frond = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.44, 4), leafMat);
+                    frond.rotation.z = 0.92;
+                    frond.rotation.y = (f / 6) * Math.PI * 2;
+                    frond.position.set(0, 0.20, 0);
+                    t.add(frond);
+                }
             } else {
                 // Cây thông lá kim 3 tầng tán (Trung du & Miền núi Bắc Bộ)
-                const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.055, 0.26, 5), darkWoodMat);
-                trunk.position.y = 0.13;
-                const c1 = new THREE.Mesh(new THREE.ConeGeometry(0.28, 0.34, 6), leafMat);
-                c1.position.y = 0.34;
-                const c2 = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.30, 6), leafMat);
-                c2.position.y = 0.56;
-                const c3 = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.26, 6), leafMat);
-                c3.position.y = 0.76;
+                const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.055, 0.24, 5), darkWoodMat);
+                trunk.position.y = 0.12;
+                const c1 = new THREE.Mesh(new THREE.ConeGeometry(0.28, 0.32, 6), leafMat);
+                c1.position.y = 0.32;
+                const c2 = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.28, 6), leafMat);
+                c2.position.y = 0.52;
+                const c3 = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.24, 6), leafMat);
+                c3.position.y = 0.70;
                 t.add(trunk, c1, c2, c3);
             }
             t.position.set(x, 0, z);
@@ -926,350 +1794,327 @@ class ProceduralModels {
         // ====================================================================
         if (spec.regionId === 0) {
             // 1. TRUNG DU & MIỀN NÚI BẮC BỘ:
-            //    Đồi núi đa giác xếp lớp 2–3 tầng xanh rêu đậm có chóp xám đá nhạt,
-            //    ruộng bậc thang 3 tầng (xanh non xen vàng nhạt), luống đồi chè xanh mướt,
-            //    cây thông lá kim 3 tầng tán & nhà sàn gỗ nhỏ mái nâu đậm.
+            //    Đồi núi xanh rêu có mỏm đá trầm + cụm cây thông 3 tầng nhiều cỡ (#1b5e20 & #2e7d32)
+            //    + ruộng bậc thang + nhà sàn gỗ nhỏ (gom cụm theo góc, chừa thoáng giữa ô).
             const mossDarkMat = mat(0x1b4332);
             const mossMidMat = mat(0x2d6a4f);
-            const rockTipMat = mat(0x94a3b8);
+            const rockTipMat = mat(0x64748b);
 
             if (variant === 0) {
-                // Cụm núi 3 tầng xanh rêu đậm có chóp xám đá nhạt + thông 3 tầng + nhà sàn gỗ
                 const addMountainPeak = (mx, mz, r, h, bodyMat) => {
                     const body = new THREE.Mesh(new THREE.ConeGeometry(r, h, 6), bodyMat);
                     body.position.set(mx, h * 0.5, mz);
                     const cap = new THREE.Mesh(new THREE.ConeGeometry(r * 0.36, h * 0.36, 6), rockTipMat);
-                    cap.position.set(mx, h * 0.84, mz);
+                    cap.position.set(mx, h * 0.82, mz);
                     group.add(body, cap);
                 };
-                addMountainPeak(-0.30, -0.26, 0.76, 1.32, mossDarkMat);
-                addMountainPeak(0.38, -0.30, 0.56, 0.96, mossMidMat);
-                addMountainPeak(-0.56, 0.28, 0.44, 0.68, mossMidMat);
+                addMountainPeak(-0.42, -0.36, 0.62, 1.05, mossDarkMat);
+                addMountainPeak(0.26, -0.44, 0.48, 0.80, mossMidMat);
 
-                addHouse(0.30, 0.34, 0.42, 0.24, 0.32, 0x78350f, 0x451a03, true, 0.25);
-                addTree(-0.12, 0.46, 0.88, "pine", 0x166534);
-                addTree(0.66, 0.16, 0.82, "pine", 0x14532d);
+                addHouse(0.42, 0.38, 0.40, 0.22, 0.30, 0x78350f, 0x451a03, true, 0.25);
+                // 2 cụm thông 3 tầng nhiều cỡ (#1b5e20 & #2e7d32)
+                addTree(-0.58, 0.34, 0.96, "pine", 0x1b5e20);
+                addTree(-0.34, 0.54, 0.76, "pine", 0x2e7d32);
+                addTree(-0.68, 0.08, 0.70, "pine", 0x2e7d32);
+                addTree(0.64, -0.14, 0.86, "pine", 0x1b5e20);
+                addTree(0.56, 0.08, 0.68, "pine", 0x2e7d32);
 
             } else if (variant === 1) {
-                // Ruộng bậc thang 3 tầng uốn lượn (xanh non xen vàng nhạt) + nhà sàn gỗ + thông
-                const terraceCols = [0x65a30d, 0x84cc16, 0xfde047];
+                const terraceCols = [0x558b2f, 0x7cb342, 0xd4b238];
                 for (let t = 0; t < 3; t++) {
                     const step = new THREE.Mesh(
-                        new THREE.CylinderGeometry(1.06 - t * 0.26, 1.16 - t * 0.26, 0.18, 7),
+                        new THREE.CylinderGeometry(0.92 - t * 0.22, 1.00 - t * 0.22, 0.16, 7),
                         mat(terraceCols[t])
                     );
-                    step.position.set(-0.08 * t, 0.09 + t * 0.17, -0.06 * t);
+                    step.position.set(-0.14 - 0.05 * t, 0.08 + t * 0.15, -0.12 - 0.04 * t);
                     group.add(step);
                 }
-                addHouse(0.46, 0.42, 0.38, 0.22, 0.30, 0x78350f, 0x451a03, true, -0.2);
-                addTree(-0.58, 0.42, 0.86, "pine", 0x15803d);
-                addTree(-0.34, -0.58, 0.80, "pine", 0x166534);
+                addHouse(0.50, 0.40, 0.38, 0.22, 0.28, 0x78350f, 0x451a03, true, -0.2);
+                addTree(-0.62, 0.44, 0.92, "pine", 0x1b5e20);
+                addTree(-0.42, 0.58, 0.74, "pine", 0x2e7d32);
+                addTree(0.46, -0.48, 0.84, "pine", 0x1b5e20);
+                addTree(0.66, -0.28, 0.70, "pine", 0x2e7d32);
 
             } else {
-                // Luống đồi chè xanh mướt xếp lớp + đỉnh núi chóp đá + cụm thông 3 tầng
-                const teaHill = new THREE.Mesh(new THREE.DodecahedronGeometry(0.68, 0), mat(0x16a34a));
-                teaHill.scale.set(1.25, 0.52, 1.15);
-                teaHill.position.set(0.04, 0.16, 0.06);
+                const teaHill = new THREE.Mesh(new THREE.DodecahedronGeometry(0.58, 0), mat(0x2e7d32));
+                teaHill.scale.set(1.18, 0.46, 1.08);
+                teaHill.position.set(0.14, 0.14, 0.16);
                 group.add(teaHill);
-                for (let row = -1; row <= 1; row++) {
-                    const ridge = new THREE.Mesh(new THREE.BoxGeometry(1.05 - Math.abs(row) * 0.20, 0.14, 0.16), mat(row === 0 ? 0x22c55e : 0x15803d));
-                    ridge.position.set(0.04, 0.28 + (row === 0 ? 0.06 : 0), 0.06 + row * 0.28);
-                    ridge.rotation.y = 0.18;
-                    group.add(ridge);
-                }
-                const backPeak = new THREE.Mesh(new THREE.ConeGeometry(0.52, 0.92, 6), mossDarkMat);
-                backPeak.position.set(-0.46, 0.46, -0.36);
-                const backTip = new THREE.Mesh(new THREE.ConeGeometry(0.19, 0.34, 6), rockTipMat);
-                backTip.position.set(-0.46, 0.78, -0.36);
+                const backPeak = new THREE.Mesh(new THREE.ConeGeometry(0.48, 0.84, 6), mossDarkMat);
+                backPeak.position.set(-0.48, 0.42, -0.40);
+                const backTip = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.30, 6), rockTipMat);
+                backTip.position.set(-0.48, 0.70, -0.40);
                 group.add(backPeak, backTip);
 
-                addTree(0.54, -0.44, 0.88, "pine", 0x14532d);
-                addTree(0.24, -0.54, 0.78, "pine", 0x166534);
-                addHouse(-0.42, 0.46, 0.36, 0.22, 0.28, 0x78350f, 0x451a03, true, 0.3);
+                addTree(0.56, -0.44, 0.92, "pine", 0x1b5e20);
+                addTree(0.32, -0.56, 0.76, "pine", 0x2e7d32);
+                addTree(-0.62, 0.16, 0.84, "pine", 0x1b5e20);
+                addTree(-0.18, 0.56, 0.72, "pine", 0x2e7d32);
+                addHouse(-0.46, 0.46, 0.36, 0.20, 0.26, 0x78350f, 0x451a03, true, 0.3);
             }
 
         } else if (spec.regionId === 1) {
             // 2. ĐỒNG BẰNG SÔNG HỒNG:
-            //    Cụm làng quê truyền thống (2–3 nhà tường vàng nhạt mái ngói đỏ gạch)
-            //    bao quanh bởi lũy tre xanh mảnh; thửa ruộng lúa xanh mướt xen kênh phù sa nâu đỏ nhạt.
-            const canal1 = new THREE.Mesh(new THREE.BoxGeometry(1.10, 0.04, 0.28), siltCanalMat);
-            canal1.position.set(-0.26, 0.025, 0.34);
-            canal1.rotation.y = 0.24;
-            const canal2 = new THREE.Mesh(new THREE.BoxGeometry(1.02, 0.04, 0.28), siltCanalMat);
-            canal2.position.set(0.36, 0.025, 0.16);
-            canal2.rotation.y = -0.22;
+            //    Cụm lũy tre xanh mướt (4–5 bụi) + thửa ruộng lúa xanh vàng chia ô rõ + mái ngói đỏ làng quê + dải sông phù sa nhỏ.
+            const canal1 = new THREE.Mesh(new THREE.BoxGeometry(1.06, 0.04, 0.24), siltCanalMat);
+            canal1.position.set(-0.24, 0.025, 0.38);
+            canal1.rotation.y = 0.22;
+            const canal2 = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.04, 0.24), siltCanalMat);
+            canal2.position.set(0.38, 0.025, 0.20);
+            canal2.rotation.y = -0.20;
             group.add(canal1, canal2);
 
             if (variant === 0) {
-                // Cụm làng quê 3 nhà tường vàng nhạt mái ngói đỏ gạch + lũy tre xanh mảnh
-                addHouse(-0.34, -0.26, 0.44, 0.22, 0.34, 0xfef3c7, 0xb91c1c, false, 0.10);
-                addHouse(0.24, -0.34, 0.38, 0.20, 0.30, 0xfef3c7, 0xc2410c, false, -0.18);
-                addHouse(-0.02, 0.02, 0.34, 0.18, 0.26, 0xfef3c7, 0xb91c1c, false, 0.05);
-                addTree(-0.66, -0.06, 0.96, "bamboo", 0x15803d);
-                addTree(0.62, -0.14, 0.94, "bamboo", 0x16a34a);
-                addTree(0.18, 0.56, 0.88, "bamboo", 0x15803d);
+                addHouse(-0.36, -0.32, 0.42, 0.20, 0.32, 0xfef3c7, 0xb91c1c, false, 0.10);
+                addHouse(0.24, -0.38, 0.36, 0.18, 0.28, 0xfef3c7, 0xc2410c, false, -0.18);
+                // 2 cụm lũy tre xanh mướt
+                addTree(-0.66, -0.06, 0.94, "bamboo", 0x15803d);
+                addTree(-0.56, 0.18, 0.82, "bamboo", 0x16a34a);
+                addTree(0.62, -0.16, 0.92, "bamboo", 0x16a34a);
+                addTree(0.56, 0.46, 0.84, "bamboo", 0x15803d);
+                addTree(0.18, 0.56, 0.78, "bamboo", 0x22c55e);
 
             } else if (variant === 1) {
-                // Thửa ruộng lúa xanh mướt chia ô rõ nét + 2 nhà làng quê + lũy tre
-                const paddyA = new THREE.Mesh(new THREE.BoxGeometry(0.64, 0.05, 0.52), mat(0x4ade80));
-                paddyA.position.set(0.28, 0.03, -0.34);
-                const paddyB = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.05, 0.48), mat(0x84cc16));
-                paddyB.position.set(-0.38, 0.03, -0.36);
+                const paddyA = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.05, 0.48), mat(0x65a30d));
+                paddyA.position.set(0.30, 0.03, -0.36);
+                const paddyB = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.05, 0.46), mat(0xd4b238));
+                paddyB.position.set(-0.36, 0.03, -0.38);
                 group.add(paddyA, paddyB);
 
-                addHouse(-0.44, 0.02, 0.38, 0.20, 0.30, 0xfef3c7, 0xb91c1c, false, 0.18);
-                addHouse(0.02, -0.04, 0.32, 0.18, 0.26, 0xfef3c7, 0xc2410c, false, -0.12);
-                addTree(0.64, -0.32, 0.94, "bamboo", 0x15803d);
-                addTree(-0.56, 0.52, 0.86, "bamboo", 0x16a34a);
+                addHouse(-0.46, 0.02, 0.36, 0.18, 0.28, 0xfef3c7, 0xb91c1c, false, 0.18);
+                addTree(0.64, -0.34, 0.92, "bamboo", 0x15803d);
+                addTree(0.62, -0.08, 0.80, "bamboo", 0x16a34a);
+                addTree(-0.60, 0.48, 0.88, "bamboo", 0x16a34a);
+                addTree(-0.38, 0.58, 0.76, "bamboo", 0x15803d);
 
             } else {
-                // Làng quê bên kênh phù sa + ruộng lúa xanh mướt + lũy tre bao quanh
-                const paddy = new THREE.Mesh(new THREE.BoxGeometry(0.88, 0.05, 0.44), mat(0x22c55e));
+                const paddy = new THREE.Mesh(new THREE.BoxGeometry(0.84, 0.05, 0.42), mat(0x84cc16));
                 paddy.position.set(0.06, 0.03, -0.46);
                 group.add(paddy);
 
-                addHouse(-0.32, -0.10, 0.44, 0.22, 0.32, 0xfef3c7, 0xc2410c, false, 0.12);
-                addHouse(0.30, -0.12, 0.38, 0.20, 0.28, 0xfef3c7, 0xb91c1c, false, -0.15);
-                addTree(-0.66, -0.34, 0.92, "bamboo", 0x15803d);
-                addTree(0.64, 0.34, 0.94, "bamboo", 0x16a34a);
+                addHouse(-0.36, -0.10, 0.40, 0.20, 0.30, 0xfef3c7, 0xc2410c, false, 0.12);
+                addHouse(0.34, -0.14, 0.36, 0.18, 0.26, 0xfef3c7, 0xb91c1c, false, -0.15);
+                addTree(-0.66, -0.36, 0.90, "bamboo", 0x15803d);
+                addTree(-0.64, 0.24, 0.82, "bamboo", 0x16a34a);
+                addTree(0.64, 0.34, 0.92, "bamboo", 0x16a34a);
+                addTree(0.42, 0.54, 0.78, "bamboo", 0x15803d);
             }
 
         } else if (spec.regionId === 2) {
             // 3. DUYÊN HẢI MIỀN TRUNG:
-            //    Đụn cát vàng nhạt ven biển thoai thoải + hàng dừa nghiêng thân mảnh;
-            //    cụm 2–3 tua-bin điện gió trắng thân mảnh (cánh quạt xoay chậm) + tấm pin mặt trời xanh lam đậm!
-            const duneLightMat = mat(0xfef08a);
-            const duneSandMat = mat(0xfde68a);
+            //    Hàng dừa nghiêng & cụm cây phi lao chắn gió trên cồn cát vàng + đồi Trường Sơn xanh phía trong + tua-bin gió/pin mặt trời gọn.
+            const duneLightMat = mat(0xe6cc8a);
+            const duneSandMat = mat(0xdcc18a);
+            const truongSonMat = mat(0x2e6b36);
 
-            const dune1 = new THREE.Mesh(new THREE.ConeGeometry(0.84, 0.36, 7), duneLightMat);
-            dune1.scale.set(1.28, 0.72, 0.95);
-            dune1.position.set(-0.22, 0.13, 0.28);
-            const dune2 = new THREE.Mesh(new THREE.ConeGeometry(0.66, 0.30, 7), duneSandMat);
-            dune2.scale.set(1.18, 0.68, 0.88);
-            dune2.position.set(0.42, 0.10, -0.24);
-            group.add(dune1, dune2);
+            const dune1 = new THREE.Mesh(new THREE.ConeGeometry(0.76, 0.28, 7), duneLightMat);
+            dune1.scale.set(1.20, 0.68, 0.90);
+            dune1.position.set(0.28, 0.10, 0.34);
+            const innerHill = new THREE.Mesh(new THREE.ConeGeometry(0.52, 0.68, 6), truongSonMat);
+            innerHill.position.set(-0.54, 0.34, -0.36);
+            group.add(dune1, innerHill);
 
             if (variant === 0) {
-                // Cụm 3 tua-bin điện gió trắng thân mảnh + tấm pin mặt trời
-                addWindTurbine(-0.46, -0.30, 1.28, 1.05);
-                addWindTurbine(0.16, -0.36, 1.16, 0.98);
-                addWindTurbine(0.48, 0.22, 1.22, 1.15);
-                addSolarPanel(-0.26, 0.42, 0.15);
-                addSolarPanel(0.14, 0.42, 0.15);
+                addWindTurbine(0.46, -0.34, 1.08, 1.05);
+                addWindTurbine(0.14, -0.44, 1.00, 0.98);
+                addSolarPanel(-0.24, 0.44, 0.15);
+                addTree(0.56, 0.28, 0.92, "palm", 0x16a34a);
+                addTree(0.32, 0.48, 0.84, "palm", 0x15803d);
+                addTree(-0.58, 0.20, 0.88, "casuarina", 0x166534);
+                addTree(-0.42, 0.38, 0.76, "casuarina", 0x15803d);
 
             } else if (variant === 1) {
-                // Trang trại điện mặt trời (4 tấm pin xanh lam đậm) + 2 tua-bin điện gió + dừa nghiêng
-                addSolarPanel(-0.42, 0.12, 0.08);
-                addSolarPanel(-0.02, 0.12, 0.08);
-                addSolarPanel(-0.42, 0.44, 0.08);
-                addSolarPanel(-0.02, 0.44, 0.08);
-                addWindTurbine(0.36, -0.34, 1.24, 1.02);
-                addWindTurbine(-0.34, -0.38, 1.14, 1.12);
-                addTree(0.52, 0.34, 0.96, "palm", 0x16a34a);
+                addSolarPanel(-0.34, 0.24, 0.08);
+                addSolarPanel(0.04, 0.24, 0.08);
+                addWindTurbine(0.38, -0.36, 1.06, 1.02);
+                addTree(0.56, 0.34, 0.94, "palm", 0x16a34a);
+                addTree(0.42, 0.52, 0.82, "palm", 0x15803d);
+                addTree(-0.18, -0.52, 0.90, "casuarina", 0x166534);
+                addTree(-0.38, -0.56, 0.78, "casuarina", 0x1b5e20);
 
             } else {
-                // Đụn cát vàng nhạt + hàng dừa nghiêng thân mảnh ven biển + 2 tua-bin điện gió
-                addWindTurbine(-0.36, -0.34, 1.24, 1.00);
-                addWindTurbine(0.38, -0.22, 1.14, 1.10);
-                addTree(-0.46, 0.38, 1.02, "palm", 0x15803d);
-                addTree(-0.04, 0.46, 0.96, "palm", 0x16a34a);
-                addTree(0.40, 0.34, 0.92, "palm", 0x15803d);
+                const dune2 = new THREE.Mesh(new THREE.ConeGeometry(0.58, 0.24, 7), duneSandMat);
+                dune2.position.set(0.44, 0.08, -0.24);
+                group.add(dune2);
+                addWindTurbine(0.38, -0.26, 1.04, 1.00);
+                addTree(0.48, 0.36, 0.96, "palm", 0x15803d);
+                addTree(0.18, 0.50, 0.90, "palm", 0x16a34a);
+                addTree(-0.18, 0.52, 0.84, "casuarina", 0x166534);
+                addTree(-0.56, 0.24, 0.92, "casuarina", 0x1b5e20);
+                addTree(-0.62, -0.02, 0.78, "casuarina", 0x2e7d32);
             }
 
         } else if (spec.regionId === 3) {
             // 4. TÂY NGUYÊN:
-            //    Gò đồi đất đỏ nâu Bazan đặc trưng + luống cây cà phê tán tròn xanh đậm xếp hàng ngay ngắn;
-            //    cụm rừng cây lá rộng thân cao + nhà gỗ mái dốc thấp hài hòa đất đỏ.
-            const basaltMat = mat(0x9a3412);
+            //    Gò đất đỏ Bazan + luống cây cà phê xanh đậm xếp hàng + cụm cây rừng tán rộng nhiều tầng + nhà gỗ mái dốc.
+            const basaltMat = mat(0x9a441e);
             const coffeeMat = mat(0x14532d);
 
-            const hill = new THREE.Mesh(new THREE.DodecahedronGeometry(0.76, 0), basaltMat);
-            hill.scale.set(1.36, 0.42, 1.20);
-            hill.position.set(0, 0.13, -0.10);
+            const hill = new THREE.Mesh(new THREE.DodecahedronGeometry(0.68, 0), basaltMat);
+            hill.scale.set(1.28, 0.38, 1.12);
+            hill.position.set(-0.08, 0.12, -0.14);
             group.add(hill);
 
             if (variant === 0) {
-                // Nhà gỗ mái dốc thấp + 2 luống cà phê xếp hàng + cụm rừng cây lá rộng thân cao
-                addHouse(-0.34, -0.14, 0.52, 0.24, 0.34, 0x78350f, 0x5c2d0c, true, 0.18, 0.56);
-                for (let row = 0; row < 2; row++) {
-                    for (let col = -1; col <= 1; col++) {
-                        const bush = new THREE.Mesh(new THREE.DodecahedronGeometry(0.15, 0), coffeeMat);
-                        bush.scale.set(1.08, 0.88, 1.08);
-                        bush.position.set(col * 0.34, 0.18, 0.30 + row * 0.28);
-                        group.add(bush);
-                    }
+                addHouse(-0.42, -0.20, 0.48, 0.22, 0.32, 0x78350f, 0x5c2d0c, true, 0.18, 0.56);
+                for (let col = -1; col <= 1; col++) {
+                    const bush = new THREE.Mesh(new THREE.DodecahedronGeometry(0.14, 0), coffeeMat);
+                    bush.position.set(col * 0.32 - 0.10, 0.16, 0.44);
+                    group.add(bush);
                 }
-                addTree(0.44, -0.32, 0.98, "broadleaf", 0x15803d);
-                addTree(0.12, -0.50, 0.90, "broadleaf", 0x166534);
+                addTree(0.48, -0.34, 0.96, "broadleaf", 0x15803d);
+                addTree(0.20, -0.52, 0.86, "broadleaf", 0x166534);
+                addTree(0.58, 0.04, 0.80, "broadleaf", 0x2e7d32);
+                addTree(0.42, 0.42, 0.76, "broadleaf", 0x14532d);
 
             } else if (variant === 1) {
-                // Luống cây cà phê tán tròn xanh đậm xếp hàng ngay ngắn (3x3) trên đồi đất đỏ Bazan
-                for (let row = -1; row <= 1; row++) {
+                for (let row = -1; row <= 0; row++) {
                     for (let col = -1; col <= 1; col++) {
-                        const bush = new THREE.Mesh(new THREE.DodecahedronGeometry(0.16, 0), coffeeMat);
-                        bush.scale.set(1.08, 0.86, 1.08);
-                        bush.position.set(col * 0.38, 0.24, row * 0.34 - 0.06);
+                        const bush = new THREE.Mesh(new THREE.DodecahedronGeometry(0.15, 0), coffeeMat);
+                        bush.position.set(col * 0.34 + 0.10, 0.20, row * 0.30 + 0.36);
                         group.add(bush);
                     }
                 }
-                addTree(-0.62, -0.44, 0.92, "broadleaf", 0x15803d);
-                addHouse(0.48, 0.48, 0.38, 0.20, 0.28, 0x78350f, 0x5c2d0c, false, -0.2, 0.55);
+                addTree(-0.56, -0.36, 0.94, "broadleaf", 0x15803d);
+                addTree(-0.28, -0.54, 0.84, "broadleaf", 0x1b5e20);
+                addTree(0.36, -0.46, 0.88, "broadleaf", 0x2e7d32);
+                addHouse(0.48, 0.44, 0.36, 0.18, 0.26, 0x78350f, 0x5c2d0c, false, -0.2, 0.55);
 
             } else {
-                // Cụm rừng cây lá rộng thân cao + nhà gỗ mái dốc thấp + 1 luống cà phê
-                addTree(-0.46, -0.34, 1.04, "broadleaf", 0x166534);
-                addTree(0.06, -0.44, 0.96, "broadleaf", 0x15803d);
-                addTree(0.50, -0.24, 0.92, "broadleaf", 0x14532d);
-                addHouse(-0.28, 0.26, 0.50, 0.24, 0.34, 0x78350f, 0x5c2d0c, true, 0.14, 0.55);
+                addTree(-0.48, -0.36, 0.98, "broadleaf", 0x166534);
+                addTree(-0.14, -0.52, 0.88, "broadleaf", 0x15803d);
+                addTree(0.48, -0.28, 0.90, "broadleaf", 0x1b5e20);
+                addTree(0.56, 0.12, 0.76, "broadleaf", 0x2e7d32);
+                addHouse(-0.36, 0.32, 0.46, 0.22, 0.32, 0x78350f, 0x5c2d0c, true, 0.14, 0.55);
                 for (let col = 0; col <= 2; col++) {
-                    const bush = new THREE.Mesh(new THREE.DodecahedronGeometry(0.15, 0), coffeeMat);
-                    bush.position.set(0.18 + col * 0.24, 0.20, 0.36 - col * 0.08);
+                    const bush = new THREE.Mesh(new THREE.DodecahedronGeometry(0.14, 0), coffeeMat);
+                    bush.position.set(0.14 + col * 0.24, 0.16, 0.46 - col * 0.06);
                     group.add(bush);
                 }
             }
 
         } else if (spec.regionId === 4) {
             // 5. ĐÔNG NAM BỘ:
-            //    Cụm đô thị & công nghiệp hiện đại: Cao ốc trắng/xanh kính nhạt (cửa sổ emissive dịu),
-            //    nhà xưởng mái vòm gọn gàng, và hàng cây cao su thẳng tắp thân xám tán xanh nhạt!
-            const glassBlueMat = mat(0x88b4d8);
+            //    Hàng cây cao su thẳng tắp (thân xám, tán xanh sáng) + mảng công viên cây xanh xen cụm cao ốc/nhà xưởng gọn gàng.
+            const glassBlueMat = mat(0x7ca6cc);
             const concreteWallMat = mat(0xd8dfe6);
-            const roofVaultMat = mat(0x94a3b8);
+            const roofVaultMat = mat(0x64748b);
             const winSoftMat = mat(0xe6ddb8);
 
             if (variant === 0) {
-                // Cụm cao ốc trắng / xanh kính nhạt (cửa sổ emissive dịu) + cây cao su
-                const t1 = new THREE.Mesh(new THREE.BoxGeometry(0.42, 1.42, 0.42), whiteMat);
-                t1.position.set(-0.26, 0.71, -0.16);
-                const w1 = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.12, 0.44), winSoftMat);
-                w1.position.set(-0.26, 1.06, -0.16);
-                const w1b = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.12, 0.44), winSoftMat);
-                w1b.position.set(-0.26, 0.64, -0.16);
+                const t1 = new THREE.Mesh(new THREE.BoxGeometry(0.38, 1.05, 0.38), whiteMat);
+                t1.position.set(-0.34, 0.525, -0.26);
+                const w1 = new THREE.Mesh(new THREE.BoxGeometry(0.40, 0.10, 0.40), winSoftMat);
+                w1.position.set(-0.34, 0.78, -0.26);
+                const t2 = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.80, 0.36), glassBlueMat);
+                t2.position.set(0.22, 0.40, -0.34);
+                group.add(t1, w1, t2);
 
-                const t2 = new THREE.Mesh(new THREE.BoxGeometry(0.40, 1.04, 0.40), glassBlueMat);
-                t2.position.set(0.30, 0.52, 0.12);
-                const w2 = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.12, 0.42), winSoftMat);
-                w2.position.set(0.30, 0.74, 0.12);
-
-                const t3 = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.68, 0.36), concreteWallMat);
-                t3.position.set(-0.34, 0.34, 0.42);
-                group.add(t1, w1, w1b, t2, w2, t3);
-
-                addTree(0.42, -0.40, 0.90, "rubber", 0x86efac);
-                addTree(0.10, -0.44, 0.88, "rubber", 0x4ade80);
+                // Mảng công viên cây xanh & hàng cao su góc dưới-phải
+                addTree(0.46, 0.20, 0.90, "rubber", 0x4ade80);
+                addTree(0.18, 0.44, 0.86, "rubber", 0x22c55e);
+                addTree(-0.24, 0.46, 0.88, "orchard", 0x16a34a);
+                addTree(-0.56, 0.30, 0.80, "rubber", 0x4ade80);
 
             } else if (variant === 1) {
-                // Khu công nghiệp: 2 nhà xưởng mái vòm gọn gàng + hàng cây cao su thẳng tắp
                 const addArchedWarehouse = (wx, wz, w, h, d) => {
                     const wall = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), concreteWallMat);
                     wall.position.set(wx, h / 2, wz);
-                    const win = new THREE.Mesh(new THREE.BoxGeometry(w + 0.02, 0.08, d + 0.02), winSoftMat);
-                    win.position.set(wx, h * 0.62, wz);
                     const vault = new THREE.Mesh(
                         new THREE.CylinderGeometry(d * 0.5, d * 0.5, w, 8, 1, false, 0, Math.PI),
                         roofVaultMat
                     );
                     vault.rotation.z = Math.PI / 2;
                     vault.position.set(wx, h, wz);
-                    group.add(wall, win, vault);
+                    group.add(wall, vault);
                 };
-                addArchedWarehouse(-0.18, -0.24, 0.86, 0.34, 0.44);
-                addArchedWarehouse(0.24, 0.32, 0.72, 0.30, 0.38);
+                addArchedWarehouse(-0.22, -0.32, 0.78, 0.30, 0.40);
+                addArchedWarehouse(0.28, 0.30, 0.64, 0.26, 0.34);
 
-                addTree(-0.56, 0.30, 0.90, "rubber", 0x86efac);
-                addTree(-0.56, 0.58, 0.88, "rubber", 0x4ade80);
+                addTree(-0.58, 0.26, 0.90, "rubber", 0x4ade80);
+                addTree(-0.52, 0.54, 0.84, "rubber", 0x22c55e);
+                addTree(0.52, -0.26, 0.88, "rubber", 0x4ade80);
+                addTree(0.56, -0.50, 0.80, "orchard", 0x16a34a);
 
             } else {
-                // Hàng cây cao su thẳng tắp (thân xám, tán xanh nhạt) + 1 tòa văn phòng kính nhạt
                 for (let row = 0; row < 2; row++) {
                     for (let col = -1; col <= 1; col++) {
-                        addTree(col * 0.38, 0.14 + row * 0.36, 0.92, "rubber", (col + row) % 2 === 0 ? 0x86efac : 0x4ade80);
+                        addTree(col * 0.36, 0.20 + row * 0.34, 0.88, "rubber", (col + row) % 2 === 0 ? 0x4ade80 : 0x22c55e);
                     }
                 }
-                const office = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.96, 0.42), glassBlueMat);
-                office.position.set(0.0, 0.48, -0.44);
-                const offWin = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.12, 0.44), winSoftMat);
-                offWin.position.set(0.0, 0.68, -0.44);
+                const office = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.84, 0.38), glassBlueMat);
+                office.position.set(-0.08, 0.42, -0.44);
+                const offWin = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.10, 0.40), winSoftMat);
+                offWin.position.set(-0.08, 0.60, -0.44);
                 group.add(office, offWin);
             }
 
         } else {
             // 6. ĐỒNG BẰNG SÔNG CỬU LONG:
-            //    Ô ruộng lúa xanh vàng, vườn cây ăn trái tán tròn xanh tươi,
-            //    ao nuôi tôm hình chữ nhật có bờ đất gọn gàng;
-            //    kênh rạch xanh ngọc uốn quanh có cầu nhỏ trắng & 1–2 ghe gỗ mini neo đậu.
-            const dikeMat = mat(0x92400e);
-            const shrimpWaterMat = mat(0x2890b0);
+            //    Rừng dừa nước & vườn cây ăn trái tán tròn đa sắc xanh (#22c55e, #15803d, #65a30d)
+            //    + kênh rạch xanh lam uốn nhẹ có cầu nhỏ & ghe gỗ.
+            const dikeMat = mat(0x7c4a21);
+            const shrimpWaterMat = mat(0x1d7a9c);
 
-            // Kênh rạch xanh ngọc uốn nhẹ
-            const canal1 = new THREE.Mesh(new THREE.BoxGeometry(1.16, 0.04, 0.30), canalTurqMat);
-            canal1.position.set(-0.24, 0.025, 0.10);
+            const canal1 = new THREE.Mesh(new THREE.BoxGeometry(1.14, 0.04, 0.28), canalTurqMat);
+            canal1.position.set(-0.24, 0.025, 0.08);
             canal1.rotation.y = 0.14;
-            const canal2 = new THREE.Mesh(new THREE.BoxGeometry(1.06, 0.04, 0.28), canalTurqMat);
-            canal2.position.set(0.38, 0.025, -0.02);
+            const canal2 = new THREE.Mesh(new THREE.BoxGeometry(1.04, 0.04, 0.26), canalTurqMat);
+            canal2.position.set(0.38, 0.025, -0.04);
             canal2.rotation.y = -0.18;
             group.add(canal1, canal2);
 
             if (variant === 0) {
-                // Kênh xanh ngọc + cầu nhỏ màu trắng + 2 ghe gỗ mini neo đậu + vườn cây ăn trái
-                const bridgeDeck = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.06, 0.64), whiteMat);
-                bridgeDeck.position.set(-0.14, 0.16, 0.10);
-                const railL = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.10, 0.64), whiteMat);
-                railL.position.set(-0.24, 0.23, 0.10);
-                const railR = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.10, 0.64), whiteMat);
-                railR.position.set(-0.04, 0.23, 0.10);
-                group.add(bridgeDeck, railL, railR);
+                const bridgeDeck = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.05, 0.60), whiteMat);
+                bridgeDeck.position.set(-0.14, 0.15, 0.08);
+                group.add(bridgeDeck);
 
-                const sampan1 = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.09, 0.16), woodMat);
-                sampan1.position.set(0.36, 0.08, -0.02);
+                const sampan1 = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.08, 0.15), woodMat);
+                sampan1.position.set(0.36, 0.08, -0.04);
                 sampan1.rotation.y = -0.18;
                 group.add(sampan1);
                 if (animRegistry) animRegistry.push({ type: "bob_boat", mesh: sampan1, baseY: 0.08, phase: r1 * 6.28 });
 
-                const sampan2 = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.08, 0.14), darkWoodMat);
-                sampan2.position.set(-0.56, 0.08, 0.14);
-                sampan2.rotation.y = 0.16;
-                group.add(sampan2);
-
-                addTree(0.46, -0.44, 0.96, "orchard", 0x22c55e);
-                addTree(-0.46, -0.42, 0.92, "orchard", 0x16a34a);
-                addTree(0.38, 0.48, 0.90, "orchard", 0x15803d);
+                // Vườn cây ăn trái đa sắc xanh + bụi dừa nước ven kênh
+                addTree(0.48, -0.46, 0.94, "orchard", 0x22c55e);
+                addTree(0.18, -0.54, 0.84, "orchard", 0x65a30d);
+                addTree(-0.48, -0.42, 0.92, "orchard", 0x15803d);
+                addTree(0.44, 0.46, 0.88, "orchard", 0x22c55e);
+                addTree(-0.46, 0.42, 0.90, "nipa", 0x15803d);
 
             } else if (variant === 1) {
-                // Ao nuôi tôm hình chữ nhật có bờ đất gọn gàng + ruộng lúa xanh vàng + 1 ghe gỗ
                 const addShrimpPond = (px, pz, pw, pd) => {
-                    const dike = new THREE.Mesh(new THREE.BoxGeometry(pw + 0.12, 0.09, pd + 0.12), dikeMat);
-                    dike.position.set(px, 0.045, pz);
-                    const pond = new THREE.Mesh(new THREE.BoxGeometry(pw, 0.10, pd), shrimpWaterMat);
-                    pond.position.set(px, 0.052, pz);
+                    const dike = new THREE.Mesh(new THREE.BoxGeometry(pw + 0.10, 0.08, pd + 0.10), dikeMat);
+                    dike.position.set(px, 0.04, pz);
+                    const pond = new THREE.Mesh(new THREE.BoxGeometry(pw, 0.09, pd), shrimpWaterMat);
+                    pond.position.set(px, 0.048, pz);
                     group.add(dike, pond);
                 };
-                addShrimpPond(-0.30, -0.38, 0.62, 0.42);
-                addShrimpPond(0.40, -0.40, 0.54, 0.38);
+                addShrimpPond(-0.32, -0.40, 0.58, 0.40);
+                addShrimpPond(0.40, -0.42, 0.52, 0.36);
 
-                const paddyGold = new THREE.Mesh(new THREE.BoxGeometry(0.76, 0.05, 0.42), mat(0xeab308));
-                paddyGold.position.set(-0.20, 0.03, 0.50);
-                group.add(paddyGold);
-
-                const sampan = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.09, 0.16), woodMat);
-                sampan.position.set(0.34, 0.08, -0.02);
+                const sampan = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.08, 0.15), woodMat);
+                sampan.position.set(0.34, 0.08, -0.04);
                 group.add(sampan);
                 if (animRegistry) animRegistry.push({ type: "bob_boat", mesh: sampan, baseY: 0.08, phase: r2 * 6.28 });
 
                 addTree(0.46, 0.46, 0.90, "orchard", 0x22c55e);
+                addTree(0.16, 0.52, 0.82, "orchard", 0x65a30d);
+                addTree(-0.44, 0.46, 0.92, "nipa", 0x15803d);
+                addTree(-0.62, 0.32, 0.80, "nipa", 0x22c55e);
 
             } else {
-                // Ô ruộng lúa xanh vàng xen kẽ + vườn cây ăn trái tán tròn xanh tươi + nhà sàn nhỏ
-                const paddyGreen = new THREE.Mesh(new THREE.BoxGeometry(0.60, 0.05, 0.44), mat(0x84cc16));
-                paddyGreen.position.set(-0.36, 0.03, -0.40);
-                const paddyYellow = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.05, 0.44), mat(0xfacc15));
-                paddyYellow.position.set(0.34, 0.03, -0.42);
+                const paddyGreen = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.05, 0.42), mat(0x65a30d));
+                paddyGreen.position.set(-0.38, 0.03, -0.42);
+                const paddyYellow = new THREE.Mesh(new THREE.BoxGeometry(0.54, 0.05, 0.42), mat(0xd4b238));
+                paddyYellow.position.set(0.34, 0.03, -0.44);
                 group.add(paddyGreen, paddyYellow);
 
-                addTree(-0.46, 0.46, 0.98, "orchard", 0x16a34a);
-                addTree(0.02, 0.52, 0.92, "orchard", 0x22c55e);
-                addTree(0.48, 0.44, 0.94, "orchard", 0x15803d);
-                addHouse(-0.02, -0.42, 0.36, 0.20, 0.28, 0xfef3c7, 0xd97706, true, 0.08);
+                addTree(-0.48, 0.46, 0.94, "orchard", 0x15803d);
+                addTree(-0.18, 0.54, 0.86, "orchard", 0x65a30d);
+                addTree(0.48, 0.44, 0.92, "orchard", 0x22c55e);
+                addTree(0.60, 0.24, 0.82, "nipa", 0x15803d);
+                addHouse(-0.02, -0.42, 0.34, 0.18, 0.26, 0xfef3c7, 0xd97706, true, 0.08);
             }
         }
 
@@ -1283,234 +2128,249 @@ class ProceduralModels {
     //    - Distinct silhouettes at zoom-out: Rice Paddy, Timber Yard, Iron Mine
     // ------------------------------------------------------------------------
     static createResourceNodeModel(resourceType) {
+        const typeKey = (resourceType === "food" || resourceType === "wood" || resourceType === "iron") ? resourceType : "food";
         const group = new THREE.Group();
-        const staticGroup = new THREE.Group();
-        const mat = (color, opts = {}) => new THREE.MeshLambertMaterial({
-            color,
-            emissive: color,
-            emissiveIntensity: 0.18,
-            flatShading: true,
-            ...opts
-        });
 
-        const woodMat = mat(0x5c2d0c);
-        const lightCutMat = mat(0xfef3c7, { emissive: 0xfef3c7, emissiveIntensity: 0.22 });
-
-        if (resourceType === "food") {
-            // MỎ LÚA: Đế nâu đậm + bó lúa vàng rực (#fde047 / #f59e0b)
-            const bundMat = mat(0x451a03, { emissiveIntensity: 0.10 });
-            const paddyGreenMat = mat(0x84cc16, { emissiveIntensity: 0.20 });
-            const riceGoldMat = mat(0xfde047, { emissive: 0xf59e0b, emissiveIntensity: 0.26 });
-            const strawMat = mat(0xf59e0b, { emissive: 0xd97706, emissiveIntensity: 0.24 });
-            const thatchMat = mat(0xd97706, { emissiveIntensity: 0.20 });
-            const rimMat = mat(0xfde047, { emissive: 0xf59e0b, emissiveIntensity: 0.85 });
-
-            const basePad = new THREE.Mesh(new THREE.CylinderGeometry(1.32, 1.40, 0.14, 6), bundMat);
-            basePad.position.y = 0.07;
-            const emRim = new THREE.Mesh(new THREE.CylinderGeometry(1.38, 1.44, 0.07, 6), rimMat);
-            emRim.position.y = 0.04;
-            staticGroup.add(basePad, emRim);
-
-            // 3 Terraced Paddy Plots with Brown Earthen Bunds
-            [
-                [-0.36, 0.15, 0.34, 0.72, 0.56],
-                [0.42, 0.18, 0.30, 0.66, 0.52],
-                [0.02, 0.21, -0.34, 0.88, 0.54]
-            ].forEach(([px, py, pz, pw, pd]) => {
-                const bund = new THREE.Mesh(new THREE.BoxGeometry(pw + 0.10, 0.10, pd + 0.10), bundMat);
-                bund.position.set(px, py, pz);
-                const plot = new THREE.Mesh(new THREE.BoxGeometry(pw, 0.12, pd), paddyGreenMat);
-                plot.position.set(px, py + 0.02, pz);
-                staticGroup.add(bund, plot);
-            });
-
-            // Clusters of Golden Rice Sheaves at Varied Heights
-            const sheafSpecs = [
-                [-0.52, 0.44, 0.24, 0.62], [-0.24, 0.22, 0.22, 0.50], [-0.40, 0.12, 0.20, 0.56],
-                [0.34, 0.42, 0.24, 0.68], [0.56, 0.20, 0.20, 0.52], [0.16, -0.22, 0.22, 0.60],
-                [-0.24, -0.34, 0.24, 0.66], [0.42, -0.36, 0.20, 0.54]
-            ];
-            sheafSpecs.forEach(([sx, sz, r, h]) => {
-                const sheaf = new THREE.Mesh(new THREE.ConeGeometry(r, h, 6), riceGoldMat);
-                sheaf.position.set(sx, 0.22 + h / 2, sz);
-                staticGroup.add(sheaf);
-            });
-
-            // Conical Haystack (Đống rơm hình chóp)
-            const haystack = new THREE.Mesh(new THREE.ConeGeometry(0.38, 0.76, 7), strawMat);
-            haystack.position.set(0.56, 0.56, -0.18);
-            staticGroup.add(haystack);
-
-            // Wooden Stilt Hut with Thatched Roof (Chòi gỗ mái lá)
-            const hutBody = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.40, 0.42), woodMat);
-            hutBody.position.set(-0.18, 0.48, -0.22);
-            const hutRoof = new THREE.Mesh(new THREE.ConeGeometry(0.46, 0.42, 4), thatchMat);
-            hutRoof.rotation.y = Math.PI / 4;
-            hutRoof.position.set(-0.18, 0.88, -0.22);
-            staticGroup.add(hutBody, hutRoof);
-
-            // Animated Mini Bamboo Waterwheel
-            const wheel = new THREE.Group();
-            const wRim = new THREE.Mesh(new THREE.TorusGeometry(0.24, 0.03, 6, 12), strawMat);
-            wheel.add(wRim);
-            for (let s = 0; s < 4; s++) {
-                const sp = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.035, 0.035), woodMat);
-                sp.rotation.z = (s / 4) * Math.PI;
-                wheel.add(sp);
-            }
-            wheel.position.set(0.18, 0.44, 0.56);
-            group.add(wheel);
-            group.userData.spinZ = wheel;
-
-        } else if (resourceType === "wood") {
-            // MỎ GỖ: Đế rêu đậm + thân gỗ nâu socola sẫm (#451a03) tương phản cực mạnh với mặt cắt vàng kem sáng (#fef3c7) + lá thông xanh lục đậm
-            const barkMat = mat(0x451a03, { emissiveIntensity: 0.12 });
-            const forestFloorMat = mat(0x14532d, { emissiveIntensity: 0.12 });
-            const leafMat = mat(0x15803d, { emissive: 0x15803d, emissiveIntensity: 0.22 });
-            const shedRoofMat = mat(0x9a3412, { emissiveIntensity: 0.18 });
-            const rimMat = mat(0x4ade80, { emissive: 0x16a34a, emissiveIntensity: 0.82 });
-
-            const mound = new THREE.Mesh(new THREE.CylinderGeometry(1.32, 1.40, 0.14, 6), forestFloorMat);
-            mound.position.y = 0.07;
-            const emRim = new THREE.Mesh(new THREE.CylinderGeometry(1.38, 1.44, 0.07, 6), rimMat);
-            emRim.position.y = 0.04;
-            staticGroup.add(mound, emRim);
-
-            // Pyramid Stack of 6 Round Timber Logs (3 + 2 + 1) with Bright Cut Ends
-            const logCoords = [
-                [0, -0.24], [0, 0.0], [0, 0.24],     // Bottom row (3)
-                [1, -0.12], [1, 0.12],                // Middle row (2)
-                [2, 0.0]                              // Top log (1)
-            ];
-            logCoords.forEach(([row, zOff]) => {
-                const ly = 0.24 + row * 0.19;
-                const lz = 0.36 + zOff;
-                const logBody = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.86, 7), barkMat);
-                logBody.rotation.z = Math.PI / 2;
-                logBody.position.set(-0.08, ly, lz);
-                // Bright cut ends on both sides
-                const endL = new THREE.Mesh(new THREE.CylinderGeometry(0.095, 0.095, 0.88, 7), lightCutMat);
-                endL.rotation.z = Math.PI / 2;
-                endL.position.set(-0.08, ly, lz);
-                staticGroup.add(logBody, endL);
-            });
-
-            // 3 Freshly-Cut Tree Stumps (Gốc cây vừa cưa)
-            [[-0.68, -0.12, 0.26], [0.64, 0.24, 0.24], [-0.56, 0.56, 0.20]].forEach(([sx, sz, sh]) => {
-                const stump = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.19, sh, 7), barkMat);
-                stump.position.set(sx, 0.14 + sh / 2, sz);
-                const cutTop = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.03, 7), lightCutMat);
-                cutTop.position.set(sx, 0.14 + sh + 0.01, sz);
-                staticGroup.add(stump, cutTop);
-            });
-
-            // Small Wooden Logging Shed (Lán gỗ nhỏ) + 2 Background Pine Trees
-            const shedBody = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.42, 0.46), woodMat);
-            shedBody.position.set(0.32, 0.36, -0.34);
-            const shedRoof = new THREE.Mesh(new THREE.ConeGeometry(0.48, 0.36, 4), shedRoofMat);
-            shedRoof.rotation.y = Math.PI / 4;
-            shedRoof.position.set(0.32, 0.74, -0.34);
-            staticGroup.add(shedBody, shedRoof);
-
-            [[-0.36, -0.46, 1.05], [-0.72, -0.42, 0.85]].forEach(([tx, tz, sc]) => {
-                const tr = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.10, 0.42, 6), barkMat);
-                tr.position.set(tx, 0.32, tz);
-                const c1 = new THREE.Mesh(new THREE.ConeGeometry(0.34 * sc, 0.54 * sc, 6), leafMat);
-                c1.position.set(tx, 0.62 * sc, tz);
-                const c2 = new THREE.Mesh(new THREE.ConeGeometry(0.24 * sc, 0.44 * sc, 6), leafMat);
-                c2.position.set(tx, 0.92 * sc, tz);
-                staticGroup.add(tr, c1, c2);
-            });
-
-            // Spinning Sawmill Blade
-            const sawBlade = new THREE.Mesh(
-                new THREE.CylinderGeometry(0.24, 0.24, 0.03, 10),
-                mat(0xe2e8f0, { emissive: 0x64748b, emissiveIntensity: 0.25 })
-            );
-            sawBlade.rotation.x = Math.PI / 2;
-            sawBlade.position.set(0.52, 0.36, 0.36);
-            group.add(sawBlade);
-            group.userData.spinZ = sawBlade;
-
-        } else if (resourceType === "iron") {
-            // MỎ SẮT / KHOÁNG SẢN: Vách đá đen than (#0f172a) làm bật cụm tinh thể xanh điện quang (#38bdf8) và bạc sáng (#f1f5f9) emissive 0.65
-            const cragMat = mat(0x0f172a, { emissiveIntensity: 0.06 });
-            const darkCragMat = mat(0x0f172a, { emissiveIntensity: 0.05 });
-            const steelMat = mat(0xe2e8f0, { emissiveIntensity: 0.22 });
-            const oreCrystalMat = mat(0x38bdf8, { emissive: 0x38bdf8, emissiveIntensity: 0.65 });
-            const silverOreMat = mat(0xf1f5f9, { emissive: 0xf1f5f9, emissiveIntensity: 0.65 });
-            const rimMat = mat(0x38bdf8, { emissive: 0x0284c7, emissiveIntensity: 0.84 });
-
-            const stonePad = new THREE.Mesh(new THREE.CylinderGeometry(1.32, 1.40, 0.14, 6), darkCragMat);
-            stonePad.position.y = 0.07;
-            const emRim = new THREE.Mesh(new THREE.CylinderGeometry(1.38, 1.44, 0.07, 6), rimMat);
-            emRim.position.y = 0.04;
-            staticGroup.add(stonePad, emRim);
-
-            // Faceted Dark-Gray Rock Crags
-            const crag1 = new THREE.Mesh(new THREE.DodecahedronGeometry(0.68, 0), cragMat);
-            crag1.scale.set(1.25, 1.35, 1.05);
-            crag1.position.set(-0.18, 0.68, -0.22);
-            const crag2 = new THREE.Mesh(new THREE.DodecahedronGeometry(0.52, 0), darkCragMat);
-            crag2.scale.set(1.05, 1.15, 0.95);
-            crag2.position.set(0.46, 0.50, -0.32);
-            staticGroup.add(crag1, crag2);
-
-            // Embedded Glowing Metallic Ore Crystals
-            [
-                [-0.58, 0.72, 0.04, oreCrystalMat, 1.15, 0.3],
-                [0.24, 0.84, -0.02, silverOreMat, 1.10, -0.25],
-                [0.62, 0.58, -0.18, oreCrystalMat, 0.95, -0.4],
-                [-0.36, 0.56, -0.62, silverOreMat, 0.90, 0.2]
-            ].forEach(([cx, cy, cz, cMat, sc, rz]) => {
-                const crys = new THREE.Mesh(new THREE.OctahedronGeometry(0.20, 0), cMat);
-                crys.scale.set(0.68 * sc, 1.65 * sc, 0.68 * sc);
-                crys.rotation.z = rz;
-                crys.position.set(cx, cy, cz);
-                staticGroup.add(crys);
-            });
-
-            // Mine Railway Track (Đoạn ray nhỏ) + Ore Minecart (Xe goòng chở quặng)
-            [-0.14, 0.14].forEach(rx => {
-                const rail = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.04, 0.96), steelMat);
-                rail.position.set(0.18 + rx, 0.16, 0.42);
-                staticGroup.add(rail);
-            });
-            for (let t = 0; t < 5; t++) {
-                const tie = new THREE.Mesh(new THREE.BoxGeometry(0.40, 0.03, 0.07), woodMat);
-                tie.position.set(0.18, 0.15, 0.04 + t * 0.19);
-                staticGroup.add(tie);
-            }
-            // Minecart Body + Wheels + Glowing Ore Heap inside
-            const cartBody = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.24, 0.46), mat(0x475569));
-            cartBody.position.set(0.18, 0.32, 0.48);
-            const cartOre1 = new THREE.Mesh(new THREE.DodecahedronGeometry(0.14, 0), oreCrystalMat);
-            cartOre1.position.set(0.14, 0.48, 0.44);
-            const cartOre2 = new THREE.Mesh(new THREE.DodecahedronGeometry(0.12, 0), silverOreMat);
-            cartOre2.position.set(0.24, 0.46, 0.54);
-            staticGroup.add(cartBody, cartOre1, cartOre2);
-
-            // Top Rotating Ore Crystal
-            const topCrystal = new THREE.Mesh(new THREE.OctahedronGeometry(0.24, 0), oreCrystalMat);
-            topCrystal.position.set(-0.18, 1.56, -0.22);
-            group.add(topCrystal);
-            group.userData.spinY = topCrystal;
+        // Unified Shared Prototype Cache across ALL 3 Mine Types (Lúa, Gỗ, Sắt):
+        // - Identical hex island footprint (~60% of hex diameter: r = 0.88..0.96)
+        // - Identical height envelope (~1.05..1.20 units, clearly below Ports, Monuments & Storm Clouds)
+        // - Reuses BufferGeometries & MeshLambertMaterials (flatShading: true, castShadow: false, zero PointLight!)
+        if (!ProceduralModels._resourceNodePrototypes) {
+            ProceduralModels._resourceNodePrototypes = {};
         }
 
-        // Merge static parts by material (flatShading: true, castShadow: false for high FPS!)
-        const mergedRes = this.mergeStaticMeshesByMaterial(staticGroup, new Set(), {
-            castShadow: false,
-            flatShading: true
-        });
-        if (mergedRes) {
-            group.add(mergedRes);
-        } else {
-            group.add(staticGroup);
+        if (!ProceduralModels._resourceNodePrototypes[typeKey]) {
+            const protoStatic = new THREE.Group();
+            const sharedMat = (color, opts = {}) => new THREE.MeshLambertMaterial({
+                color,
+                flatShading: true,
+                ...opts
+            });
+
+            // Unified beveled low-poly hex island base shared geometry
+            const baseGeo = new THREE.CylinderGeometry(0.88, 0.96, 0.13, 6);
+
+            if (typeKey === "food") {
+                // 🌾 MỎ LÚA: Cánh Đồng Lúa Chín & Kho Thóc Gọn (peak y ≈ 1.06)
+                const bundMat = sharedMat(0x78716c);
+                const paddyRichMat = sharedMat(0xeab308, { emissive: 0xca8a04, emissiveIntensity: 0.16 });
+                const paddyBrightMat = sharedMat(0xfacc15, { emissive: 0xeab308, emissiveIntensity: 0.18 });
+                const hutWallMat = sharedMat(0x92400e);
+                const thatchMat = sharedMat(0xd97706);
+                const haystackMat = sharedMat(0xf59e0b, { emissive: 0xd97706, emissiveIntensity: 0.16 });
+
+                const pad = new THREE.Mesh(baseGeo, bundMat);
+                pad.position.y = 0.065;
+                protoStatic.add(pad);
+
+                // 3 neat terraced golden rice plots with thin earthen bunds
+                [
+                    [-0.24, 0.15, 0.24, 0.52, 0.40, paddyRichMat],
+                    [0.30, 0.16, 0.20, 0.44, 0.36, paddyBrightMat],
+                    [0.08, 0.17, -0.26, 0.62, 0.38, paddyRichMat]
+                ].forEach(([px, py, pz, pw, pd, pMat]) => {
+                    const bund = new THREE.Mesh(new THREE.BoxGeometry(pw + 0.07, 0.07, pd + 0.07), bundMat);
+                    bund.position.set(px, py, pz);
+                    const plot = new THREE.Mesh(new THREE.BoxGeometry(pw, 0.085, pd), pMat);
+                    plot.position.set(px, py + 0.015, pz);
+                    protoStatic.add(bund, plot);
+                });
+
+                // 6 compact low golden rice sheaves
+                const sheafGeo = new THREE.ConeGeometry(0.12, 0.32, 6);
+                [
+                    [-0.36, 0.32], [-0.14, 0.18], [0.22, 0.30],
+                    [0.42, 0.14], [0.16, -0.20], [0.36, -0.28]
+                ].forEach(([sx, sz]) => {
+                    const sheaf = new THREE.Mesh(sheafGeo, paddyBrightMat);
+                    sheaf.position.set(sx, 0.34, sz);
+                    protoStatic.add(sheaf);
+                });
+
+                // Compact thatched granary/rice hut in back-left corner (peak y ≈ 1.04)
+                const hutBody = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.34, 0.34), hutWallMat);
+                hutBody.position.set(-0.32, 0.34, -0.26);
+                const hutRoof = new THREE.Mesh(new THREE.ConeGeometry(0.36, 0.36, 4), thatchMat);
+                hutRoof.rotation.y = Math.PI / 4;
+                hutRoof.position.set(-0.32, 0.68, -0.26);
+                protoStatic.add(hutBody, hutRoof);
+
+                // 2 round golden haystacks / grain sacks in front-right corner
+                const stack1 = new THREE.Mesh(new THREE.ConeGeometry(0.24, 0.44, 7), haystackMat);
+                stack1.position.set(0.34, 0.38, 0.28);
+                const stack2 = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.34, 7), haystackMat);
+                stack2.position.set(0.12, 0.33, 0.44);
+                protoStatic.add(stack1, stack2);
+
+            } else if (typeKey === "wood") {
+                // 🌲 MỎ GỖ: Trại Lâm Trường Gọn (peak y ≈ 1.18)
+                const grassBaseMat = sharedMat(0x5c7a32);
+                const postMat = sharedMat(0x78350f);
+                const roofMat = sharedMat(0xb45309);
+                const barkMat = sharedMat(0x7c2d12);
+                const cutEndMat = sharedMat(0xfde68a, { emissive: 0xfde68a, emissiveIntensity: 0.16 });
+                const pineDarkMat = sharedMat(0x15803d);
+                const pineFreshMat = sharedMat(0x16a34a);
+
+                const pad = new THREE.Mesh(baseGeo, grassBaseMat);
+                pad.position.y = 0.065;
+                protoStatic.add(pad);
+
+                // Compact slanted-roof sawmill shed in back-right (matches Food granary scale)
+                [
+                    [0.10, -0.38, 0.36], [0.54, -0.38, 0.36],
+                    [0.10, -0.02, 0.28], [0.54, -0.02, 0.28]
+                ].forEach(([px, pz, ph]) => {
+                    const post = new THREE.Mesh(new THREE.BoxGeometry(0.05, ph, 0.05), postMat);
+                    post.position.set(px, 0.13 + ph * 0.5, pz);
+                    protoStatic.add(post);
+                });
+                const shedRoof = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.06, 0.48), roofMat);
+                shedRoof.position.set(0.32, 0.48, -0.20);
+                shedRoof.rotation.x = 0.22;
+                protoStatic.add(shedRoof);
+
+                // Signature 3-2-1 Pyramid Stack of 6 Round Timber Logs (bark #7c2d12 + bright cream cut ends #fde68a)
+                const logGeo = new THREE.CylinderGeometry(0.082, 0.082, 0.60, 7);
+                logGeo.rotateZ(Math.PI / 2);
+                const cutEndGeo = new THREE.CylinderGeometry(0.070, 0.070, 0.62, 7);
+                cutEndGeo.rotateZ(Math.PI / 2);
+                [
+                    [0, -0.17], [0, 0.0], [0, 0.17],
+                    [1, -0.085], [1, 0.085],
+                    [2, 0.0]
+                ].forEach(([row, zOff]) => {
+                    const ly = 0.21 + row * 0.145;
+                    const lz = 0.28 + zOff;
+                    const logMesh = new THREE.Mesh(logGeo, barkMat);
+                    logMesh.position.set(-0.06, ly, lz);
+                    const cutMesh = new THREE.Mesh(cutEndGeo, cutEndMat);
+                    cutMesh.position.set(-0.06, ly, lz);
+                    protoStatic.add(logMesh, cutMesh);
+                });
+
+                // 3 compact multi-tier timber/pine trees in back (max height <= 1.18)
+                [
+                    [-0.46, -0.34, 0.86, pineDarkMat],
+                    [-0.16, -0.44, 0.96, pineFreshMat],
+                    [-0.58, -0.02, 0.72, pineDarkMat]
+                ].forEach(([tx, tz, sc, lMat]) => {
+                    const tr = new THREE.Mesh(new THREE.CylinderGeometry(0.048, 0.07, 0.28 * sc, 6), postMat);
+                    tr.position.set(tx, 0.13 + 0.14 * sc, tz);
+                    const tier1 = new THREE.Mesh(new THREE.ConeGeometry(0.24 * sc, 0.38 * sc, 6), lMat);
+                    tier1.position.set(tx, 0.13 + 0.42 * sc, tz);
+                    const tier2 = new THREE.Mesh(new THREE.ConeGeometry(0.17 * sc, 0.32 * sc, 6), lMat);
+                    tier2.position.set(tx, 0.13 + 0.66 * sc, tz);
+                    protoStatic.add(tr, tier1, tier2);
+                });
+
+                // 2 low freshly-cut stumps in front revealing bright cut tops (#fde68a)
+                [
+                    [0.44, 0.30, 0.15],
+                    [-0.48, 0.36, 0.13]
+                ].forEach(([sx, sz, sh]) => {
+                    const stump = new THREE.Mesh(new THREE.CylinderGeometry(0.095, 0.12, sh, 7), barkMat);
+                    stump.position.set(sx, 0.13 + sh * 0.5, sz);
+                    const cutTop = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.085, 0.02, 7), cutEndMat);
+                    cutTop.position.set(sx, 0.13 + sh + 0.01, sz);
+                    protoStatic.add(stump, cutTop);
+                });
+
+            } else {
+                // ⛏️ MỎ SẮT: Hầm Mỏ Quặng Gọn (peak y ≈ 1.08 — cân đối hoàn toàn với Mỏ Lúa & Mỏ Gỗ)
+                const rockLightMat = sharedMat(0x475569);
+                const rockDarkMat = sharedMat(0x334155);
+                const tunnelVoidMat = sharedMat(0x0f172a);
+                const timberMat = sharedMat(0x78350f);
+                const lanternMat = sharedMat(0xfbbf24, { emissive: 0xf59e0b, emissiveIntensity: 0.90 });
+                const railMat = sharedMat(0x94a3b8);
+                const oreSilverMat = sharedMat(0xcbd5e1, { emissive: 0x38bdf8, emissiveIntensity: 0.18 });
+
+                const pad = new THREE.Mesh(baseGeo, rockDarkMat);
+                pad.position.y = 0.065;
+                protoStatic.add(pad);
+
+                // Compact angular low-poly rock hill (lowered to match Wood & Food height!)
+                const cragGeo = (typeof THREE.DodecahedronGeometry !== "undefined")
+                    ? new THREE.DodecahedronGeometry(0.46, 0)
+                    : new THREE.OctahedronGeometry(0.46, 0);
+                const mainHill = new THREE.Mesh(cragGeo, rockLightMat);
+                mainHill.scale.set(1.18, 0.95, 0.88);
+                mainHill.position.set(-0.06, 0.46, -0.22);
+                const sideHill = new THREE.Mesh(cragGeo, rockDarkMat);
+                sideHill.scale.set(0.78, 0.70, 0.74);
+                sideHill.position.set(0.36, 0.34, -0.26);
+                protoStatic.add(mainHill, sideHill);
+
+                // Mine Tunnel Opening (#0f172a) + U-shaped Timber Frame (#78350f) + Warm Hanging Lantern
+                const tunnelVoid = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.38, 0.16), tunnelVoidMat);
+                tunnelVoid.position.set(0.0, 0.32, 0.12);
+                const postL = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.42, 0.08), timberMat);
+                postL.position.set(-0.19, 0.34, 0.19);
+                const postR = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.42, 0.08), timberMat);
+                postR.position.set(0.19, 0.34, 0.19);
+                const topBeam = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.08, 0.09), timberMat);
+                topBeam.position.set(0.0, 0.56, 0.19);
+                const lantern = new THREE.Mesh(new THREE.BoxGeometry(0.095, 0.11, 0.095), lanternMat);
+                lantern.position.set(0.0, 0.46, 0.23);
+                protoStatic.add(tunnelVoid, postL, postR, topBeam, lantern);
+
+                // 2 short parallel steel rails + loaded silver-ore minecart
+                [-0.10, 0.10].forEach(rx => {
+                    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.028, 0.026, 0.60), railMat);
+                    rail.position.set(rx, 0.14, 0.46);
+                    protoStatic.add(rail);
+                });
+                [0.28, 0.46, 0.64].forEach(tz => {
+                    const tie = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.02, 0.048), timberMat);
+                    tie.position.set(0.0, 0.13, tz);
+                    protoStatic.add(tie);
+                });
+                const cartBody = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.17, 0.30), rockDarkMat);
+                cartBody.position.set(0.0, 0.24, 0.48);
+                const oreChunkGeo = (typeof THREE.OctahedronGeometry !== "undefined")
+                    ? new THREE.OctahedronGeometry(0.095, 0)
+                    : new THREE.BoxGeometry(0.14, 0.14, 0.14);
+                const cartOre1 = new THREE.Mesh(oreChunkGeo, oreSilverMat);
+                cartOre1.position.set(-0.04, 0.35, 0.46);
+                const cartOre2 = new THREE.Mesh(oreChunkGeo, oreSilverMat);
+                cartOre2.scale.set(0.85, 0.85, 0.85);
+                cartOre2.position.set(0.06, 0.34, 0.52);
+                protoStatic.add(cartBody, cartOre1, cartOre2);
+
+                // 2 faceted metallic-silver ore clusters jutting from rock slopes
+                [
+                    [-0.46, 0.48, -0.06, 0.95, 0.32],
+                    [0.32, 0.56, -0.14, 0.88, -0.28]
+                ].forEach(([ox, oy, oz, sc, rz]) => {
+                    const ore = new THREE.Mesh(oreChunkGeo, oreSilverMat);
+                    ore.scale.set(0.85 * sc, 1.20 * sc, 0.85 * sc);
+                    ore.rotation.z = rz;
+                    ore.position.set(ox, oy, oz);
+                    protoStatic.add(ore);
+                });
+            }
+
+            const mergedProto = this.mergeStaticMeshesByMaterial(protoStatic, new Set(), {
+                castShadow: false,
+                flatShading: true
+            });
+            ProceduralModels._resourceNodePrototypes[typeKey] = mergedProto || protoStatic;
         }
 
-        // Scale x1.3 for clear Resource Node silhouette (stays neatly within hex footprint)
-        group.scale.set(1.32, 1.42, 1.32);
-        group.userData.baseScale = { x: 1.32, y: 1.42, z: 1.32 };
+        const cachedProto = ProceduralModels._resourceNodePrototypes[typeKey];
+        const instanceClone = (cachedProto && typeof cachedProto.clone === "function") ? cachedProto.clone(true) : cachedProto;
+        if (instanceClone) group.add(instanceClone);
+
+        // Normalized "Fit-1-Hex" scale (~84% hex width r=1.30/1.55, balanced height ~1.44..1.51, below Ports & Monuments!)
+        const scaleByType = {
+            food: { x: 1.36, y: 1.36, z: 1.36 },
+            wood: { x: 1.36, y: 1.28, z: 1.36 },
+            iron: { x: 1.36, y: 1.34, z: 1.36 }
+        };
+        const sc = scaleByType[typeKey] || scaleByType.food;
+        group.scale.set(sc.x, sc.y, sc.z);
+        group.userData.baseScale = sc;
         return group;
     }
 
@@ -1714,6 +2574,40 @@ class ProceduralModels {
             });
         }
 
+        // 6. Prominent Harbor Flagpole with Dynamic Owner-Colored Flag (recolored per Charter Owner!)
+        const flagPoleMat = mat(0xf8fafc, { emissiveIntensity: 0.25 });
+        const flagPole = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.042, 1.68, 6), flagPoleMat);
+        flagPole.position.set(1.06, 1.04, 0.22);
+        const flagFinial = new THREE.Mesh(
+            new THREE.SphereGeometry(0.075, 6, 6),
+            mat(0xfde047, { emissive: 0xf59e0b, emissiveIntensity: 0.75 })
+        );
+        flagFinial.position.set(1.06, 1.90, 0.22);
+        staticGroup.add(flagPole, flagFinial);
+
+        const flagPivot = new THREE.Group();
+        flagPivot.position.set(1.06, 1.66, 0.22);
+        const ownerFlagMat = new THREE.MeshLambertMaterial({
+            color: 0xffffff,
+            emissive: 0x38bdf8,
+            emissiveIntensity: 0.32,
+            side: THREE.DoubleSide,
+            flatShading: true
+        });
+        const ownerFlagMesh = new THREE.Mesh(new THREE.BoxGeometry(0.76, 0.44, 0.03), ownerFlagMat);
+        ownerFlagMesh.position.set(0.39, 0, 0);
+        const ownerFlagAccentMat = new THREE.MeshLambertMaterial({
+            color: 0x0284c7,
+            emissive: 0x38bdf8,
+            emissiveIntensity: 0.40,
+            side: THREE.DoubleSide,
+            flatShading: true
+        });
+        const ownerFlagAccentMesh = new THREE.Mesh(new THREE.BoxGeometry(0.77, 0.14, 0.036), ownerFlagAccentMat);
+        ownerFlagAccentMesh.position.set(0.39, 0.15, 0);
+        flagPivot.add(ownerFlagMesh, ownerFlagAccentMesh);
+        group.add(flagPivot);
+
         // Merge static port parts by material (flatShading: true, castShadow: true) for high FPS!
         const mergedPort = this.mergeStaticMeshesByMaterial(staticGroup, new Set(), {
             castShadow: true,
@@ -1727,9 +2621,19 @@ class ProceduralModels {
         }
         craneArmGroup.traverse(c => { if (c.isMesh) c.castShadow = true; });
 
-        // Scale x1.35 for Trade Ports (base fits cleanly within hex tile)
-        group.scale.set(1.36, 1.48, 1.36);
-        group.userData = { lantern, lhBeamPivot, spinY: craneArmGroup, baseScale: { x: 1.36, y: 1.48, z: 1.36 } };
+        // Scale up ~9% in height so Lighthouse & Cranes pop clearly above coastline
+        group.scale.set(1.40, 1.62, 1.40);
+        group.userData = {
+            lantern,
+            lhBeamPivot,
+            spinY: craneArmGroup,
+            flagPivot,
+            ownerFlagMesh,
+            ownerFlagMat,
+            ownerFlagAccentMesh,
+            ownerFlagAccentMat,
+            baseScale: { x: 1.40, y: 1.62, z: 1.40 }
+        };
         return group;
     }
 
@@ -1746,7 +2650,7 @@ class ProceduralModels {
         const mat = (color, opts = {}) => new THREE.MeshLambertMaterial({
             color,
             emissive: color,
-            emissiveIntensity: 0.18,
+            emissiveIntensity: 0.05,
             flatShading: true,
             ...opts
         });
@@ -2531,25 +3435,45 @@ class ProceduralModels {
         const staticGroup = new THREE.Group();
         const mat = (color, opts = {}) => new THREE.MeshLambertMaterial({ color, flatShading: true, ...opts });
 
-        const shoalTurqMat = mat(0x2dd4bf, { emissive: 0x0d9488, emissiveIntensity: 0.28, transparent: true, opacity: 0.65 });
-        const whiteSandMat = mat(0xfef9c3);
+        const shoalTurqMat = mat(0x2dd4bf, { emissive: 0x0d9488, emissiveIntensity: 0.24, transparent: true, opacity: 0.62 });
+        const whiteSandMat = mat(0xe6cc8f);
+        const rockMat = mat(0x475569);
         const phongBaLeafMat = mat(0x15803d);
+        const palmLeafMat = mat(0x22c55e);
         const phongBaTrunkMat = mat(0x6b3e1b);
         const stoneWhiteMat = mat(0xf8fafc);
         const redMat = mat(0xdc2626, { emissive: 0x991b1b, emissiveIntensity: 0.22 });
         const goldMat = mat(0xfacc15, { emissive: 0xca8a04, emissiveIntensity: 0.35 });
 
         const addPhongBaTree = (tx, ty, tz, sc = 1.0) => {
-            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.03 * sc, 0.05 * sc, 0.26 * sc, 5), phongBaTrunkMat);
-            trunk.position.set(tx, ty + 0.13 * sc, tz);
+            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.03 * sc, 0.05 * sc, 0.28 * sc, 5), phongBaTrunkMat);
+            trunk.position.set(tx, ty + 0.14 * sc, tz);
             trunk.rotation.z = 0.14;
-            const crown = new THREE.Mesh(new THREE.DodecahedronGeometry(0.22 * sc, 0), phongBaLeafMat);
+            const crown = new THREE.Mesh(new THREE.DodecahedronGeometry(0.24 * sc, 0), phongBaLeafMat);
             crown.scale.set(1.25, 0.72, 1.15);
-            crown.position.set(tx + 0.03 * sc, ty + 0.30 * sc, tz);
+            crown.position.set(tx + 0.03 * sc, ty + 0.32 * sc, tz);
             staticGroup.add(trunk, crown);
         };
 
-        // Đảo cát trắng / san hô + viền nước nông xanh ngọc + cây phong ba nhỏ
+        const addArchPalm = (tx, ty, tz, sc = 1.0, rotY = 0) => {
+            const pGrp = new THREE.Group();
+            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.025 * sc, 0.042 * sc, 0.50 * sc, 5), phongBaTrunkMat);
+            trunk.position.set(0.04 * sc, 0.24 * sc, 0);
+            trunk.rotation.z = -0.22;
+            pGrp.add(trunk);
+            for (let f = 0; f < 5; f++) {
+                const frond = new THREE.Mesh(new THREE.ConeGeometry(0.09 * sc, 0.36 * sc, 4), palmLeafMat);
+                frond.rotation.z = 1.15;
+                frond.rotation.y = (f / 5) * Math.PI * 2;
+                frond.position.set(0.09 * sc, 0.48 * sc, 0);
+                pGrp.add(frond);
+            }
+            pGrp.position.set(tx, ty, tz);
+            pGrp.rotation.y = rotY;
+            staticGroup.add(pGrp);
+        };
+
+        // Đảo cát vàng ấm / san hô + viền nước nông xanh ngọc + mỏm đá trầm + cây phong ba & dừa biển
         const atolls = [
             [0, 0, 1.38],
             [-1.32, -0.92, 0.76],
@@ -2563,14 +3487,21 @@ class ProceduralModels {
             sand.position.set(ax, 0.14, az);
             staticGroup.add(shoalRim, sand);
             if (idx > 0) {
-                addPhongBaTree(ax, 0.22, az, 0.82 + (idx % 2) * 0.18);
+                addPhongBaTree(ax, 0.22, az, 0.85 + (idx % 2) * 0.18);
+                addArchPalm(ax + 0.22, 0.22, az - 0.16, 0.78, idx * 1.4);
+                const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.22, 0), rockMat);
+                rock.scale.set(1.2, 0.75, 1.0);
+                rock.position.set(ax - 0.24, 0.24, az + 0.18);
+                staticGroup.add(rock);
             }
         });
 
-        // Cây phong ba nhỏ trên đảo chính
-        addPhongBaTree(0.58, 0.22, -0.34, 1.05);
-        addPhongBaTree(-0.62, 0.22, 0.36, 0.92);
-        addPhongBaTree(0.46, 0.22, 0.44, 0.85);
+        // Cây phong ba & dừa biển trên đảo chính
+        addPhongBaTree(0.58, 0.22, -0.34, 1.08);
+        addPhongBaTree(-0.62, 0.22, 0.36, 0.94);
+        addPhongBaTree(0.46, 0.22, 0.44, 0.88);
+        addArchPalm(-0.54, 0.22, -0.44, 0.92, 0.6);
+        addArchPalm(0.68, 0.22, 0.06, 0.84, 2.2);
 
         // Cột mốc chủ quyền màu trắng nổi bật + lá cờ đỏ sao vàng
         const obeliskBase = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.26, 0.72), stoneWhiteMat);
@@ -2843,7 +3774,7 @@ class ProceduralModels {
         ctx.fillText("E", 482, cy);
         ctx.fillText("W", 30, cy);
 
-        const tex = new THREE.CanvasTexture(canvas);
+        const tex = ProceduralModels.configureSharpCanvasTexture(new THREE.CanvasTexture(canvas), true);
         const geo = new THREE.PlaneGeometry(18, 18);
         geo.rotateX(-Math.PI / 2);
         const mat = new THREE.MeshBasicMaterial({
@@ -2859,54 +3790,157 @@ class ProceduralModels {
     }
 
     static createMutedBorderTerrainCluster(seed = 1) {
+        // Dải đất liền & dãy núi biên giới phía Tây & Bắc (~20% dịu hơn 6 vùng Việt Nam, có rừng cây, sườn đá & thung lũng)
         const staticGroup = new THREE.Group();
         const r1 = this.seededRandom(seed + 3);
         const r2 = this.seededRandom(seed + 7);
+        const r3 = this.seededRandom(seed + 13);
         const mat = (col) => new THREE.MeshLambertMaterial({ color: col, flatShading: true });
-        const hillMatA = mat(0x526b7a); // Muted gray-blue
-        const hillMatB = mat(0x6e7b74); // Muted sage-gray
-        const baseMat = mat(0x8a8675);  // Muted pale-beige
 
-        const base = new THREE.Mesh(new THREE.CylinderGeometry(3.4, 4.4, 0.32, 7), baseMat);
-        base.position.y = 0.08;
-        staticGroup.add(base);
+        const cliffMat = mat(0x5d534a);      // Chân đất đá nâu xám
+        const turfDarkMat = mat(0x3d5e42);   // Cỏ rừng xanh trầm
+        const turfMidMat = mat(0x4b6b4a);    // Cỏ thung lũng xanh dịu
+        const rockSlopeMat = mat(0x525e66);  // Sườn đá lộ thiên
+        const forestDarkMat = mat(0x264d32); // Rừng thông trầm
+        const forestMidMat = mat(0x32613e);  // Rừng tán rộng trầm
+        const trunkMat = mat(0x4a3525);
 
-        const mounds = [
-            { x: -1.1, z: -0.4, r: 2.1, h: 1.45 + r1 * 0.55, m: hillMatA },
-            { x: 1.3,  z: 0.5,  r: 1.8, h: 1.15 + r2 * 0.45, m: hillMatB },
-            { x: 0.1,  z: -1.3, r: 1.5, h: 0.95 + r1 * 0.35, m: hillMatA }
+        // 1. Nền đất liền đa tầng (vách nâu xám + mặt cỏ rừng xanh trầm)
+        const pads = [
+            { x: 0.0,  z: 0.0,  rTop: 3.3, rBot: 4.2, h: 0.42, turf: turfDarkMat },
+            { x: -1.8, z: -0.9, rTop: 2.2, rBot: 2.9, h: 0.54, turf: turfMidMat },
+            { x: 1.9,  z: 0.8,  rTop: 2.0, rBot: 2.7, h: 0.36, turf: turfDarkMat }
         ];
-        mounds.forEach(md => {
-            const hill = new THREE.Mesh(new THREE.ConeGeometry(md.r, md.h, 6), md.m);
-            hill.position.set(md.x, 0.20 + md.h * 0.45, md.z);
-            staticGroup.add(hill);
+        pads.forEach(pd => {
+            const cliff = new THREE.Mesh(new THREE.CylinderGeometry(pd.rTop, pd.rBot, pd.h, 7), cliffMat);
+            cliff.position.set(pd.x, pd.h * 0.45, pd.z);
+            const turf = new THREE.Mesh(new THREE.CylinderGeometry(pd.rTop * 0.96, pd.rTop * 1.01, 0.14, 7), pd.turf);
+            turf.position.set(pd.x, pd.h * 0.90, pd.z);
+            staticGroup.add(cliff, turf);
         });
+
+        // 2. Dãy đồi núi thấp & trung bình nối tiếp nhau có sườn đá lộ thiên và thung lũng xen kẽ
+        const peaks = [
+            { x: -1.6, z: -0.7, r: 1.65, h: 1.55 + r1 * 0.45, m: turfDarkMat, hasRock: true },
+            { x: 0.2,  z: -1.4, r: 1.35, h: 1.20 + r2 * 0.35, m: turfMidMat,  hasRock: true },
+            { x: 1.5,  z: 0.5,  r: 1.45, h: 1.05 + r3 * 0.35, m: turfDarkMat, hasRock: false },
+            { x: -0.4, z: 1.2,  r: 1.15, h: 0.85 + r1 * 0.25, m: turfMidMat,  hasRock: false },
+            { x: -2.4, z: 0.6,  r: 1.10, h: 0.95 + r2 * 0.25, m: turfDarkMat, hasRock: true }
+        ];
+        peaks.forEach(pk => {
+            const body = new THREE.Mesh(new THREE.ConeGeometry(pk.r, pk.h, 6), pk.m);
+            body.position.set(pk.x, 0.36 + pk.h * 0.48, pk.z);
+            staticGroup.add(body);
+            if (pk.hasRock) {
+                const rockCap = new THREE.Mesh(new THREE.ConeGeometry(pk.r * 0.42, pk.h * 0.42, 6), rockSlopeMat);
+                rockCap.position.set(pk.x, 0.36 + pk.h * 0.78, pk.z);
+                staticGroup.add(rockCap);
+            }
+        });
+
+        // 3. Cụm cây thông & rừng tán rộng low-poly rải thành mảng dọc sườn đồi & chân núi
+        const addBorderTree = (tx, ty, tz, sc, isPine) => {
+            const tr = new THREE.Mesh(new THREE.CylinderGeometry(0.05 * sc, 0.07 * sc, 0.28 * sc, 5), trunkMat);
+            tr.position.set(tx, ty + 0.14 * sc, tz);
+            staticGroup.add(tr);
+            if (isPine) {
+                const c1 = new THREE.Mesh(new THREE.ConeGeometry(0.32 * sc, 0.46 * sc, 5), forestDarkMat);
+                c1.position.set(tx, ty + 0.42 * sc, tz);
+                const c2 = new THREE.Mesh(new THREE.ConeGeometry(0.22 * sc, 0.38 * sc, 5), forestDarkMat);
+                c2.position.set(tx, ty + 0.68 * sc, tz);
+                staticGroup.add(c1, c2);
+            } else {
+                const crown = new THREE.Mesh(new THREE.DodecahedronGeometry(0.32 * sc, 0), forestMidMat);
+                crown.scale.set(1.18, 0.86, 1.12);
+                crown.position.set(tx, ty + 0.42 * sc, tz);
+                staticGroup.add(crown);
+            }
+        };
+
+        const treeSpots = [
+            [-0.5, 0.40, 0.1,  1.05, true],
+            [0.8,  0.38, -0.3, 0.92, false],
+            [1.1,  0.38, 1.4,  0.98, true],
+            [2.4,  0.34, 0.1,  0.86, false],
+            [-1.3, 0.42, 1.6,  0.94, true],
+            [-2.6, 0.46, -0.5, 0.90, true],
+            [0.1,  0.40, 1.9,  0.84, false],
+            [1.8,  0.36, -1.2, 0.88, true]
+        ];
+        treeSpots.forEach(([tx, ty, tz, sc, isPine]) => addBorderTree(tx, ty, tz, sc, isPine));
 
         const merged = this.mergeStaticMeshesByMaterial(staticGroup, new Set(), { castShadow: false, flatShading: true });
         return merged || staticGroup;
     }
 
     static createOuterCoralIsletCluster(seed = 1) {
+        // Đảo nhỏ ngoài khơi giàu sức sống: cát vàng ấm + mỏm đá trầm + 3–4 cây dừa & phong ba xanh mướt
         const staticGroup = new THREE.Group();
         const r1 = this.seededRandom(seed + 5);
+        const r2 = this.seededRandom(seed + 11);
         const mat = (col, opts = {}) => new THREE.MeshLambertMaterial({ color: col, flatShading: true, ...opts });
-        const shoalMat = mat(0x2dd4bf, { emissive: 0x0d9488, emissiveIntensity: 0.18, transparent: true, opacity: 0.46 });
-        const sandMat = mat(0xe7d8b1);
-        const rockMat = mat(0x475569);
-        const bushMat = mat(0x2d6a4f);
 
-        const shoal = new THREE.Mesh(new THREE.CylinderGeometry(2.3, 2.6, 0.05, 9), shoalMat);
+        const shoalMat = mat(0x2dd4bf, { emissive: 0x0d9488, emissiveIntensity: 0.18, transparent: true, opacity: 0.48 });
+        const sandMat = mat(0xdcc18a);
+        const rockDarkMat = mat(0x475569);
+        const rockSlateMat = mat(0x334155);
+        const trunkMat = mat(0x6b3e1b);
+        const palmLeafMat = mat(0x22c55e);
+        const phongBaMat = mat(0x15803d);
+
+        // Bãi cạn xanh ngọc + 2 lớp bãi cát vàng ấm tự nhiên
+        const shoal = new THREE.Mesh(new THREE.CylinderGeometry(2.45, 2.75, 0.05, 10), shoalMat);
         shoal.position.y = 0.02;
-        const sand = new THREE.Mesh(new THREE.CylinderGeometry(1.45, 1.85, 0.22, 8), sandMat);
-        sand.position.y = 0.12;
-        const rock1 = new THREE.Mesh(new THREE.DodecahedronGeometry(0.68, 0), rockMat);
-        rock1.scale.set(1.2, 0.85 + r1 * 0.35, 1.0);
-        rock1.position.set(-0.35, 0.44, -0.15);
-        const rock2 = new THREE.Mesh(new THREE.DodecahedronGeometry(0.42, 0), rockMat);
-        rock2.position.set(0.55, 0.30, 0.32);
-        const bush = new THREE.Mesh(new THREE.DodecahedronGeometry(0.32, 0), bushMat);
-        bush.position.set(0.28, 0.38, -0.34);
-        staticGroup.add(shoal, sand, rock1, rock2, bush);
+        const sandMain = new THREE.Mesh(new THREE.CylinderGeometry(1.58, 1.98, 0.24, 8), sandMat);
+        sandMain.position.y = 0.13;
+        const sandSpit = new THREE.Mesh(new THREE.CylinderGeometry(0.92, 1.20, 0.18, 7), sandMat);
+        sandSpit.position.set(0.75, 0.10, 0.42);
+        staticGroup.add(shoal, sandMain, sandSpit);
+
+        // 3 mỏm đá trầm ven đảo
+        const rock1 = new THREE.Mesh(new THREE.DodecahedronGeometry(0.62, 0), rockDarkMat);
+        rock1.scale.set(1.22, 0.82 + r1 * 0.28, 1.0);
+        rock1.position.set(-0.48, 0.42, -0.24);
+        const rock2 = new THREE.Mesh(new THREE.DodecahedronGeometry(0.38, 0), rockSlateMat);
+        rock2.position.set(0.68, 0.30, -0.34);
+        const rock3 = new THREE.Mesh(new THREE.DodecahedronGeometry(0.32, 0), rockDarkMat);
+        rock3.position.set(-0.78, 0.26, 0.38);
+        staticGroup.add(rock1, rock2, rock3);
+
+        // Helper: Cây dừa nghiêng ven biển
+        const addIsletPalm = (px, pz, sc, rotY) => {
+            const pGrp = new THREE.Group();
+            const tr = new THREE.Mesh(new THREE.CylinderGeometry(0.03 * sc, 0.05 * sc, 0.62 * sc, 5), trunkMat);
+            tr.position.set(0.06 * sc, 0.30 * sc, 0);
+            tr.rotation.z = -0.24;
+            pGrp.add(tr);
+            for (let f = 0; f < 5; f++) {
+                const fr = new THREE.Mesh(new THREE.ConeGeometry(0.11 * sc, 0.42 * sc, 4), palmLeafMat);
+                fr.rotation.z = 1.14;
+                fr.rotation.y = (f / 5) * Math.PI * 2;
+                fr.position.set(0.12 * sc, 0.60 * sc, 0);
+                pGrp.add(fr);
+            }
+            pGrp.position.set(px, 0.22, pz);
+            pGrp.rotation.y = rotY;
+            staticGroup.add(pGrp);
+        };
+
+        // Helper: Cây phong ba tán tròn xanh đậm
+        const addIsletPhongBa = (px, pz, sc) => {
+            const tr = new THREE.Mesh(new THREE.CylinderGeometry(0.04 * sc, 0.06 * sc, 0.30 * sc, 5), trunkMat);
+            tr.position.set(px, 0.22 + 0.15 * sc, pz);
+            const cr = new THREE.Mesh(new THREE.DodecahedronGeometry(0.30 * sc, 0), phongBaMat);
+            cr.scale.set(1.22, 0.78, 1.14);
+            cr.position.set(px, 0.22 + 0.38 * sc, pz);
+            staticGroup.add(tr, cr);
+        };
+
+        // 2 cây dừa nghiêng + 2 cây phong ba tán xanh mướt
+        addIsletPalm(0.28, 0.36, 1.05, r1 * 6.28);
+        addIsletPalm(-0.18, -0.58, 0.92, r2 * 6.28 + 1.8);
+        addIsletPhongBa(0.46, -0.06, 0.96);
+        addIsletPhongBa(-0.36, 0.48, 0.84);
 
         const merged = this.mergeStaticMeshesByMaterial(staticGroup, new Set(), { castShadow: false, flatShading: true });
         return merged || staticGroup;
